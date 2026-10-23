@@ -1,9 +1,8 @@
 import { env } from 'cloudflare:workers';
+import { isIP } from 'node:net';
+import { RateLimitBuckets } from './rate-limit';
 
-const rateBuckets = new Map<
-  string,
-  { startedAt: number; count: number }
->();
+const rateBuckets = new RateLimitBuckets();
 
 export const JSON_BODY_LIMIT_BYTES = 32 * 1024;
 export const ADMIN_JSON_BODY_LIMIT_BYTES = 64 * 1024;
@@ -21,52 +20,37 @@ function jsonError(
 ): Response {
   const responseHeaders = new Headers(headers);
   responseHeaders.set('Cache-Control', 'no-store');
-  return Response.json({ error: message }, {
-    status,
-    headers: responseHeaders,
-  });
-}
-
-function requestAddress(request: Request): string {
-  return (
-    request.headers.get('CF-Connecting-IP')?.trim() ||
-    request.headers.get('X-Real-IP')?.trim() ||
-    request.headers.get('X-Forwarded-For')?.split(',')[0]?.trim() ||
-    'anonymous'
+  return Response.json(
+    { error: message },
+    {
+      status,
+      headers: responseHeaders,
+    },
   );
 }
 
+function requestAddress(request: Request): string {
+  // ECS ingress overwrites X-Real-IP and the forwarding headers. Never let a
+  // client-supplied Cloudflare header or an earlier proxy hop override it.
+  const raw =
+    request.headers.get('X-Real-IP') ??
+    request.headers.get('X-Forwarded-For')?.split(',').at(-1) ??
+    request.headers.get('CF-Connecting-IP');
+  const address = raw?.trim() ?? '';
+  return address.length <= 45 && isIP(address) ? address : 'anonymous';
+}
+
 /**
- * 进程内令牌桶。ECS 上的站点是单实例 Worker 进程；即使未来扩容，
- * 它仍能作为每实例的第一层保护，边缘层可再叠加更严格的全局限流。
+ * 有容量上限的进程内固定窗口限流。各桶按自己的窗口过期，清理最多每秒
+ * 一次；新地址不能通过填满缓存来挤掉已生效的限额。入口 Nginx 另做限流。
  */
 export function enforceRateLimit(
   request: Request,
   options: RateLimitOptions,
 ): Response | null {
-  const now = Date.now();
   const key = `${options.label}:${requestAddress(request)}`;
-
-  for (const [bucketKey, bucket] of rateBuckets) {
-    if (now - bucket.startedAt > options.windowMs * 2) {
-      rateBuckets.delete(bucketKey);
-    }
-  }
-
-  const current = rateBuckets.get(key);
-  const bucket =
-    !current || now - current.startedAt >= options.windowMs
-      ? { startedAt: now, count: 0 }
-      : current;
-  bucket.count += 1;
-  rateBuckets.set(key, bucket);
-
-  if (bucket.count <= options.limit) return null;
-
-  const retryAfter = Math.max(
-    1,
-    Math.ceil((bucket.startedAt + options.windowMs - now) / 1000),
-  );
+  const retryAfter = rateBuckets.consume(key, options.limit, options.windowMs);
+  if (retryAfter === null) return null;
   return jsonError('请求过于频繁，请稍后重试。', 429, {
     'Retry-After': String(retryAfter),
     'X-RateLimit-Limit': String(options.limit),
@@ -86,7 +70,10 @@ export async function readJsonObject(
     advertisedLength > maxBytes
   ) {
     return {
-      response: jsonError(`请求内容不能超过 ${Math.round(maxBytes / 1024)} KB。`, 413),
+      response: jsonError(
+        `请求内容不能超过 ${Math.round(maxBytes / 1024)} KB。`,
+        413,
+      ),
     };
   }
 
@@ -131,7 +118,10 @@ export async function readJsonObject(
   }
   if (bytes.byteLength > maxBytes) {
     return {
-      response: jsonError(`请求内容不能超过 ${Math.round(maxBytes / 1024)} KB。`, 413),
+      response: jsonError(
+        `请求内容不能超过 ${Math.round(maxBytes / 1024)} KB。`,
+        413,
+      ),
     };
   }
 
@@ -228,13 +218,22 @@ export function isPrivateHostname(hostname: string): boolean {
   if (hostname.includes(':')) {
     // IPv6 唯一本地地址 fc00::/7
     const prefix = hostname.slice(0, 2);
-    return prefix === 'fc' || prefix === 'fd' || prefix === 'fe8' || prefix === 'fe9' || prefix === 'fea' || prefix === 'feb';
+    return (
+      prefix === 'fc' ||
+      prefix === 'fd' ||
+      prefix === 'fe8' ||
+      prefix === 'fe9' ||
+      prefix === 'fea' ||
+      prefix === 'feb'
+    );
   }
 
   const parts = hostname.split('.');
   if (parts.length !== 4) return false;
   const octets = parts.map((part) => Number(part));
-  if (octets.some((value) => !Number.isInteger(value) || value < 0 || value > 255)) {
+  if (
+    octets.some((value) => !Number.isInteger(value) || value < 0 || value > 255)
+  ) {
     return false;
   }
   const [a, b] = octets;
@@ -338,7 +337,10 @@ export function enforceRequestPolicy(request: Request): Response | null {
     request.headers.get('Host')?.trim();
   const forwardedProtocol =
     request.headers.get('X-Forwarded-Proto')?.split(',')[0]?.trim() || '';
-  if (forwardedHost && (forwardedProtocol === 'http' || forwardedProtocol === 'https')) {
+  if (
+    forwardedHost &&
+    (forwardedProtocol === 'http' || forwardedProtocol === 'https')
+  ) {
     try {
       allowedOrigins.add(
         new URL(`${forwardedProtocol}://${forwardedHost}`).origin.toLowerCase(),
@@ -354,7 +356,8 @@ export function enforceRequestPolicy(request: Request): Response | null {
     try {
       const configuredUrl = new URL(value);
       if (
-        (configuredUrl.protocol === 'http:' || configuredUrl.protocol === 'https:') &&
+        (configuredUrl.protocol === 'http:' ||
+          configuredUrl.protocol === 'https:') &&
         configuredUrl.pathname === '/' &&
         !configuredUrl.search &&
         !configuredUrl.hash &&
@@ -379,7 +382,10 @@ export function enforceRequestPolicy(request: Request): Response | null {
  * 需要使用公开 API 令牌。这样既保留工作台调用能力，也不会把 POST
  * 当成一个可被任意跨站表单触发的匿名执行端点。
  */
-export function enforceExecutionAccess(request: Request): Response | null {
+export function enforceExecutionAccess(
+  request: Request,
+  options: { allowConsumerClientMarker?: boolean } = {},
+): Response | null {
   const policy = enforceRequestPolicy(request);
   if (policy) return policy;
 
@@ -388,6 +394,17 @@ export function enforceExecutionAccess(request: Request): Response | null {
     request.headers.get('Origin')?.trim() ||
     fetchSite === 'same-origin' ||
     fetchSite === 'same-site'
+  ) {
+    return null;
+  }
+
+  // Some embedded browsers omit both Origin and Sec-Fetch-Site on same-origin
+  // GETs. The consumer UI opts into this narrow marker via a custom header;
+  // because it is non-simple, a cross-origin browser cannot send it without a
+  // preflight that this endpoint does not permit. Keep it opt-in per route.
+  if (
+    options.allowConsumerClientMarker &&
+    request.headers.get('X-Urtoris-Consumer-Client') === '1'
   ) {
     return null;
   }

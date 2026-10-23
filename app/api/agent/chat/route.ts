@@ -3,12 +3,29 @@ import {
   buildAgentReply,
   type AgentAnalysis,
 } from '@/lib/server/agent-brain';
+import { isLlmReasoningEffort } from '@/lib/llm/providers';
 import {
   buildWorkflowSystemPrompt,
   callChatModel,
   resolveLlmSelection,
   type ChatMessage,
 } from '@/lib/server/llm';
+import {
+  ConsumerSessionError,
+  consumerSessionErrorResponse,
+  getConsumerSession,
+  getConsumerMessage,
+  type ConsumerSession,
+} from '@/lib/server/consumer-store';
+import {
+  persistChatRunReply,
+  persistDatabaseChatProgress,
+} from '@/lib/server/consumer-chat';
+import {
+  composeContextualMessage,
+  loadConversationHistory,
+  type ConversationHistoryOptions,
+} from '@/lib/server/conversation-history';
 import { callN8nWorkflow } from '@/lib/server/n8n';
 import { buildRequest, extractMessage } from '@/lib/server/protocol';
 import {
@@ -31,6 +48,14 @@ import {
   enforceRateLimit,
   readJsonObject,
 } from '@/lib/server/security';
+import { getActiveWorkflowVersion } from '@/lib/server/workflow-version-store';
+import { hasAgentConstraints } from '@/lib/workflow-graph/agent-constraints';
+import { hasLocalDatabaseNodes } from '@/lib/workflow-graph/local-database';
+import {
+  DATABASE_CHAT_BODY_BYTES,
+  DatabaseAgentError,
+  runDatabaseAgentTurn,
+} from '@/lib/server/database-agent';
 
 function readOptionalString(value: unknown, limit: number): string | undefined {
   if (typeof value !== 'string') return undefined;
@@ -124,7 +149,7 @@ export async function POST(request: Request) {
   });
   if (rateLimitError) return rateLimitError;
 
-  const parsed = await readJsonObject(request);
+  const parsed = await readJsonObject(request, DATABASE_CHAT_BODY_BYTES);
   if ('response' in parsed) return parsed.response;
   const body = parsed.body;
 
@@ -152,12 +177,102 @@ export async function POST(request: Request) {
   const message = body.message.trim();
   const analysis = analyzeMessage(message);
 
+  // 在浏览器会话授权后读取完整记录；读取失败不能退化成只发送当前一句。
+  const consumerSessionId = readOptionalString(body.consumerSessionId, 80);
+  const agentMessageId = readOptionalString(body.agentMessageId, 80);
+  if (agentMessageId && !consumerSessionId) {
+    return Response.json({ error: '回复消息缺少所属对话。' }, { status: 400 });
+  }
+  let consumerSession: ConsumerSession | null = null;
+  const historyOptions: ConversationHistoryOptions = {
+    currentMessageId: readOptionalString(body.userMessageId, 80),
+    currentText: message,
+  };
+  let conversationHistory: ChatMessage[] = [];
+  try {
+    if (consumerSessionId) {
+      consumerSession = await getConsumerSession(
+        request,
+        workflow.id,
+        consumerSessionId,
+      );
+      if (!consumerSession) {
+        throw new ConsumerSessionError(
+          '这条对话不存在或不属于当前浏览器。',
+          404,
+        );
+      }
+      if (agentMessageId) {
+        const agentMessage = await getConsumerMessage(
+          consumerSession.id,
+          agentMessageId,
+        );
+        if (!agentMessage || agentMessage.role !== 'agent') {
+          throw new ConsumerSessionError('回复消息未保存在当前对话中。', 409);
+        }
+        const linkedRequestId = agentMessage.metadata.chatRequestId;
+        if (linkedRequestId && linkedRequestId !== body.requestId) {
+          throw new ConsumerSessionError('回复消息与当前请求不匹配。', 409);
+        }
+      }
+      conversationHistory = await loadConversationHistory(
+        consumerSession.id,
+        historyOptions,
+      );
+    }
+  } catch (cause) {
+    return consumerSessionErrorResponse(cause);
+  }
+  const chatResponse = async (
+    payload: Record<string, unknown>,
+    status = 200,
+  ) => {
+    if (consumerSession && agentMessageId && payload.run) {
+      await persistChatRunReply(
+        consumerSession,
+        agentMessageId,
+        payload.run as WorkflowRun,
+        {
+          intent: analysis.intent,
+          priority: analysis.priority,
+        },
+      );
+    }
+    return Response.json(payload, {
+      status,
+      headers: { 'Cache-Control': 'no-store' },
+    });
+  };
+  const chatReplayResponse = async (run: WorkflowRun) => {
+    const response = replayResponse(run, analysis);
+    return chatResponse(
+      (await response.json()) as Record<string, unknown>,
+      response.status,
+    );
+  };
+  // n8n 侧的提示词节点只读 message（归一后是 question），看不到 context，
+  // 也不一定挂了 Memory 节点：把历史拼进 message，任何绑定的工作流都能接上。
+  // 站点自己的运行记录仍然保存用户原话（见下面的 createN8nRun）。
+  const n8nMessage = composeContextualMessage(message, conversationHistory);
+
   // 使用端在界面上自带的模型配置；服务端只透传，不落盘。
   // provider 决定用哪家 API（以及默认端点/默认模型），Key 永远是用户自带的。
   const apiKey = readOptionalString(body.apiKey, 400);
   const provider = readOptionalString(body.provider, 40);
   const requestedBaseUrl = readOptionalString(body.baseUrl, 400);
   const requestedModel = readOptionalString(body.model, 120);
+  const reasoningEffort =
+    body.reasoningEffort === undefined
+      ? 'auto'
+      : isLlmReasoningEffort(body.reasoningEffort)
+        ? body.reasoningEffort
+        : null;
+  if (!reasoningEffort) {
+    return Response.json(
+      { error: '推理强度只能是 auto、low、medium 或 high。' },
+      { status: 400 },
+    );
+  }
   const selection = resolveLlmSelection({
     provider,
     baseUrl: requestedBaseUrl,
@@ -177,9 +292,52 @@ export async function POST(request: Request) {
     return requestIdError();
   }
 
+  // 发布快照决定执行端。电脑文件只能交给浏览器连接助手，不能落到旧 n8n 地址。
+  const publishedVersion = await getActiveWorkflowVersion(workflow.id);
+  const publishedGraph = publishedVersion?.graph;
+  const hasLocalDatabases = Boolean(
+    publishedGraph && hasLocalDatabaseNodes(publishedGraph),
+  );
+  if (hasLocalDatabases && !incomingRequestId) {
+    return Response.json(
+      {
+        error: '本机数据库对话需要 requestId，以便安全继续查询。',
+        errorCode: 'LOCAL_DATABASE_REQUEST_ID_REQUIRED',
+      },
+      { status: 400 },
+    );
+  }
+  if (
+    hasLocalDatabases &&
+    ['filePath', 'sql', 'parameters', 'maxRows', 'databaseRequests'].some(
+      (key) => Object.hasOwn(body, key),
+    )
+  ) {
+    return Response.json(
+      {
+        error:
+          '数据库文件和工具参数只能来自发布版本及已签名工具请求，不允许由客户端覆盖。',
+        errorCode: 'LOCAL_DATABASE_RESULTS_INVALID',
+      },
+      { status: 400 },
+    );
+  }
+  if (
+    !hasLocalDatabases &&
+    (body.databaseSession !== undefined || body.databaseResults !== undefined)
+  ) {
+    return Response.json(
+      {
+        error: '当前发布版本没有本机数据库，会话已失效，请重新发送。',
+        errorCode: 'LOCAL_DATABASE_SESSION_INVALID',
+      },
+      { status: 409 },
+    );
+  }
+
   // ── 分支一：工作流绑定了 n8n webhook → 一切交给真实引擎 ──
   // 关键点：模型 Key 不是存在 n8n 里，而是随请求透传给 n8n（BYO Key）。
-  if (workflow.n8nWebhookUrl) {
+  if (workflow.n8nWebhookUrl && !hasLocalDatabases) {
     // 幂等三连：格式校验 → 重放已完成的 → 抢执行权（抢不到就等，绝不重复跑）
     const decision = decideReplay(
       incomingRequestId ? await getRunByRequestId(incomingRequestId) : null,
@@ -190,7 +348,7 @@ export async function POST(request: Request) {
       return Response.json({ error: decision.message }, { status: 409 });
     }
     if (decision.kind === 'replay') {
-      return replayResponse(decision.run, analysis);
+      return chatReplayResponse(decision.run);
     }
 
     let claimedRunId: string | null = null;
@@ -210,7 +368,7 @@ export async function POST(request: Request) {
             { status: 409 },
           );
         }
-        return replayResponse(settled, analysis);
+        return chatReplayResponse(settled);
       }
       claimedRunId = claim.runId;
     }
@@ -218,12 +376,20 @@ export async function POST(request: Request) {
     const startedAt = Date.now();
     const envelopeRequest = buildRequest({
       workflowId: workflow.id,
-      message,
+      message: n8nMessage ?? message,
       requestId: incomingRequestId ?? null,
       sessionId: incomingSessionId ?? null,
       userId: readOptionalString(body.userId, 80) ?? null,
-      llm: apiKey ? { apiKey, baseUrl, model } : null,
-      context: { intentHint: analysis.intent },
+      llm: apiKey ? { apiKey, baseUrl, model, reasoningEffort } : null,
+      context: {
+        intentHint: analysis.intent,
+        // 原始输入始终单独保留一份：工作流需要干净文本时用它，
+        // 运行记录和页面显示的也仍然是这句原话。
+        currentMessage: message,
+        // n8n 侧的 Memory 只覆盖它自己跑过的轮次；把站点已落库的历史一并带上，
+        // 让绑定 n8n 的工作流也能看到同一个会话的前文。
+        ...(conversationHistory.length ? { conversationHistory } : {}),
+      },
       source: 'urtoris-web',
       workflowVersion: workflow.version,
       workflowName: workflow.name,
@@ -253,7 +419,7 @@ export async function POST(request: Request) {
       if (!envelope.success) {
         // 失败必须如实暴露：带上错误码、requestId 和这次运行的记录。
         const code = envelope.error?.code ?? 'INTERNAL_ERROR';
-        return Response.json(
+        return chatResponse(
           {
             error: `[${code}] ${envelope.error?.message ?? 'n8n 执行失败'}`,
             errorCode: code,
@@ -265,7 +431,7 @@ export async function POST(request: Request) {
             run,
             envelope,
           },
-          { status: 502 },
+          502,
         );
       }
 
@@ -273,7 +439,7 @@ export async function POST(request: Request) {
         extractMessage(envelope.data) ??
         `「${workflow.name}」已在 n8n 上执行完成。`;
 
-      return Response.json({
+      return chatResponse({
         reply,
         intent: analysis.intent,
         priority: analysis.priority,
@@ -310,7 +476,30 @@ export async function POST(request: Request) {
     return Response.json({ error: directDecision.message }, { status: 409 });
   }
   if (directDecision.kind === 'replay') {
-    return replayResponse(directDecision.run, analysis);
+    return chatReplayResponse(directDecision.run);
+  }
+
+  // 运行时只读取发布快照，草稿修改不能提前改变 Agent 的行为边界。
+  const shouldCallModel = Boolean(apiKey) || !selection.selection.keyRequired;
+  if (!shouldCallModel && hasLocalDatabases) {
+    return Response.json(
+      {
+        error:
+          '本机数据库查询需要真实模型，请配置 API Key 或连接可用的本机模型后重试。',
+        errorCode: 'LOCAL_DATABASE_REQUIRE_MODEL',
+      },
+      { status: 409 },
+    );
+  }
+  if (!shouldCallModel && hasAgentConstraints(publishedGraph)) {
+    return Response.json(
+      {
+        error:
+          '当前工作流的 Agent 配置了自然语言行为限制，模拟执行无法应用这些限制。请配置 API Key 或连接本机模型后重试。',
+        errorCode: 'AGENT_CONSTRAINTS_REQUIRE_MODEL',
+      },
+      { status: 409 },
+    );
   }
 
   let claimedRunId: string | null = null;
@@ -330,7 +519,7 @@ export async function POST(request: Request) {
           { status: 409 },
         );
       }
-      return replayResponse(settled, analysis);
+      return chatReplayResponse(settled);
     }
     claimedRunId = claim.runId;
   }
@@ -348,25 +537,115 @@ export async function POST(request: Request) {
       source: 'urtoris-web',
       workflowVersion: workflow.version,
     });
-    const startedAt = Date.now();
+    let startedAt = Date.now();
+    let modelTurns = 1;
     let reply: string;
     let mode: ChatMode;
     let usedModel: string | undefined;
 
     // 本机模型（Ollama）这类服务不需要 Key：只要服务本身允许免 Key，就照样真调模型。
-    const shouldCallModel = Boolean(apiKey) || !selection.selection.keyRequired;
     if (shouldCallModel) {
       const history: ChatMessage[] = [
-        { role: 'system', content: buildWorkflowSystemPrompt(workflow) },
+        {
+          role: 'system',
+          content: buildWorkflowSystemPrompt(workflow, publishedGraph, {
+            hasConversationHistory: conversationHistory.length > 0,
+          }),
+        },
+        ...conversationHistory,
         { role: 'user', content: message },
       ];
-      const result = await callChatModel({
+      const llm = {
         apiKey: apiKey ?? '',
         provider: selection.selection.providerId,
         baseUrl,
         model,
-        messages: history,
-      });
+        reasoningEffort,
+      };
+      let result;
+      if (
+        hasLocalDatabases &&
+        publishedGraph &&
+        publishedVersion &&
+        incomingRequestId
+      ) {
+        try {
+          const progressSession = consumerSession;
+          const databaseTurn = await runDatabaseAgentTurn({
+            graph: publishedGraph,
+            binding: {
+              workflowId: workflow.id,
+              versionId: publishedVersion.id,
+              requestId: incomingRequestId,
+              sessionId: incomingSessionId ?? null,
+              consumerSessionId: consumerSessionId ?? null,
+              agentMessageId: agentMessageId ?? null,
+              userMessageId: historyOptions.currentMessageId ?? null,
+              message,
+              provider: selection.selection.providerId,
+              baseUrl,
+              model,
+              reasoningEffort,
+            },
+            messages: history.map((entry) =>
+              entry.role === 'assistant'
+                ? { ...entry, role: 'assistant' as const, toolCalls: [] }
+                : { ...entry, role: entry.role as 'system' | 'user' },
+            ),
+            llm,
+            databaseSession: body.databaseSession,
+            databaseResults: body.databaseResults,
+            onProgress:
+              progressSession && agentMessageId
+                ? (expiresAt) =>
+                    persistDatabaseChatProgress(
+                      progressSession,
+                      agentMessageId,
+                      incomingRequestId,
+                      publishedVersion.id,
+                      expiresAt,
+                    )
+                : undefined,
+          });
+          if (databaseTurn.kind === 'pending') {
+            return Response.json(
+              {
+                mode: 'local-database',
+                requestId: incomingRequestId,
+                database: databaseTurn.database,
+              },
+              { headers: { 'Cache-Control': 'no-store' } },
+            );
+          }
+          startedAt = databaseTurn.startedAt;
+          modelTurns = databaseTurn.turns;
+          result =
+            databaseTurn.kind === 'completed'
+              ? {
+                  ok: true as const,
+                  text: databaseTurn.text,
+                  model: databaseTurn.model,
+                }
+              : {
+                  ok: false as const,
+                  error: databaseTurn.error,
+                  code: databaseTurn.code,
+                };
+        } catch (cause) {
+          if (cause instanceof DatabaseAgentError) {
+            return Response.json(
+              { error: cause.message, errorCode: cause.code },
+              {
+                status: cause.status,
+                headers: { 'Cache-Control': 'no-store' },
+              },
+            );
+          }
+          throw cause;
+        }
+      } else {
+        result = await callChatModel({ ...llm, messages: history });
+      }
 
       if (!result.ok) {
         // 用户主动提供了 Key，失败时不降级、不伪装成功，且失败记录也参与幂等重放。
@@ -381,12 +660,12 @@ export async function POST(request: Request) {
             errorCode: result.code,
             errorMessage: result.error,
             durationMs: Date.now() - startedAt,
-            attempts: 1,
+            attempts: modelTurns,
             mode: 'llm',
             degraded: false,
           },
         });
-        return Response.json(
+        return chatResponse(
           {
             error: result.error,
             errorCode: result.code,
@@ -399,7 +678,7 @@ export async function POST(request: Request) {
             sessionId: directRequest.sessionId,
             run,
           },
-          { status: 502 },
+          502,
         );
       }
 
@@ -429,14 +708,14 @@ export async function POST(request: Request) {
           requestId: directRequest.requestId,
           sessionId: directRequest.sessionId,
           durationMs: Date.now() - startedAt,
-          attempts: 1,
+          attempts: modelTurns,
           mode: mode === 'model' ? 'llm' : 'simulated',
           degraded: mode !== 'model',
         },
       },
     );
 
-    return Response.json({
+    return chatResponse({
       reply,
       intent: analysis.intent,
       priority,

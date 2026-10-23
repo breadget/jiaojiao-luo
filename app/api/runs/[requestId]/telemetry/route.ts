@@ -1,4 +1,5 @@
 import { getD1 } from '@/db';
+import { env } from 'cloudflare:workers';
 import { guardAdminRequest, jsonResponse } from '@/lib/server/graph-api';
 import {
   type NodeBinding,
@@ -7,7 +8,8 @@ import {
   projectNodeTelemetry,
   unmappedExternalNodes,
 } from '@/lib/server/node-telemetry';
-import { getActiveWorkflowVersion } from '@/lib/server/workflow-version-store';
+import { getActiveWorkflowVersion, getWorkflowVersion } from '@/lib/server/workflow-version-store';
+import { getRuntimeStream } from '@/lib/server/graph-runtime-events';
 import { getRunByRequestId } from '@/lib/server/workflow-store';
 import type { WorkflowGraphV1 } from '@/lib/workflow-graph/types';
 
@@ -20,7 +22,8 @@ import type { WorkflowGraphV1 } from '@/lib/workflow-graph/types';
  * 游标语义：返回 `nextSeq`，客户端下次带 `?afterSeq=nextSeq` 即可断线重连，
  * 不重复、不丢事件 —— 这就是"SSE 中断后重新拉取"的实现方式。
  *
- * 节点集合来自**当前生效的发布版本**的绑定；事件里的 n8n 节点若在绑定表里找不到，
+ * Graph runtime 节点集合来自 execution.bound 固定的发布版本；旧运行使用当前版本。
+ * 事件里的 n8n 节点若在绑定表里找不到，
  * 会被列进 `unmappedNodes`，而不是静默留成 waiting。
  */
 export async function GET(
@@ -51,7 +54,9 @@ export async function GET(
     return jsonResponse({ error: '没有这个 requestId 的运行记录。' }, 404);
   }
 
-  const version = await getActiveWorkflowVersion(run.workflowId);
+  const stream = run.executionId && (env as unknown as Record<string, unknown>).URTORIS_GRAPH_RUNTIME_CANARY === '1'
+    ? await getRuntimeStream(run.executionId) : null;
+  const version = stream ? await getWorkflowVersion(stream.version_id) : await getActiveWorkflowVersion(run.workflowId);
   const graph = version ? (version.graph as WorkflowGraphV1) : null;
   const bindings: NodeBinding[] = version?.bindings ?? [];
   const graphNodes = graph?.nodes ?? [];
@@ -61,6 +66,7 @@ export async function GET(
     afterSeq,
     limit,
     bindings,
+    executionId: stream?.execution_id,
   });
 
   const telemetry = projectNodeTelemetry({
@@ -97,7 +103,7 @@ export async function GET(
     requestId,
     run: {
       id: run.id,
-      status: run.status,
+      status: stream ? (stream.terminal_type === 'run.completed' ? 'completed' : stream.terminal_type === 'run.failed' ? 'failed' : 'running') : run.status,
       workflowId: run.workflowId,
       executionId: run.executionId ?? null,
       engine: run.engine ?? null,
@@ -112,6 +118,8 @@ export async function GET(
     bindingCount: bindings.length,
     /** prebound = 危险节点之前就报了 executionId；legacy = 只可能是旧工作流走时间窗 fallback。 */
     binding,
+    eventSource: stream ? 'n8n-execution-data-v1' : null,
+    eventsComplete: stream ? stream.terminal_type !== null : null,
     nodes,
     events,
     unmappedNodes: unmappedExternalNodes(bindings, events),

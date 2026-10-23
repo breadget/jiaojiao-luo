@@ -1,6 +1,11 @@
-import { guardAdminRequest, jsonResponse, routeWorkflowId } from '@/lib/server/graph-api';
+import {
+  guardAdminRequest,
+  jsonResponse,
+  routeWorkflowId,
+} from '@/lib/server/graph-api';
 import { getWorkflowById } from '@/lib/server/workflow-store';
 import {
+  GraphPublishRejected,
   WorkflowVersionNotFound,
   rollbackWorkflowGraph,
 } from '@/lib/server/workflow-version-store';
@@ -20,7 +25,9 @@ export async function POST(
   if (guard) return guard;
 
   const params = await context.params;
-  const id = await routeWorkflowId({ params: Promise.resolve({ id: params.id }) });
+  const id = await routeWorkflowId({
+    params: Promise.resolve({ id: params.id }),
+  });
   const versionId = params.versionId.trim();
 
   if (!versionId) {
@@ -39,9 +46,12 @@ export async function POST(
     return jsonResponse({
       version: result.version,
       previousVersionId: result.previousVersionId,
-      adapterLocked: true,
+      adapterLocked: result.version.adapter !== 'local-sqlite',
     });
   } catch (cause) {
+    if (cause instanceof GraphPublishRejected) {
+      return jsonResponse({ error: cause.message, issues: cause.issues }, 422);
+    }
     if (cause instanceof WorkflowVersionNotFound) {
       return jsonResponse({ error: '该发布版本不存在。' }, 404);
     }

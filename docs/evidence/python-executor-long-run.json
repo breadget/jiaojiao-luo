@@ -1,0 +1,83 @@
+{
+  "generatedAt": "2026-09-15T00:54:18.826Z",
+  "updatedAt": "2026-09-15T09:52:54Z",
+  "command": "npm run executor:gate:long",
+  "executorUrl": "http://127.0.0.1:3010",
+  "csv": {
+    "rows": 1000000,
+    "bytes": 5889664
+  },
+  "asyncSubmission": {
+    "taskId": "task_f3567cd820c54865aaa0e10bba11c876",
+    "runId": "run_5bd26fe76a4c46c2b6794a7f1690f72a",
+    "submissionMs": 11,
+    "initialStatus": "queued"
+  },
+  "longRun": {
+    "status": "succeeded",
+    "profile": "long",
+    "createdAt": "2026-09-15T00:53:09.153Z",
+    "startedAt": "2026-09-15T00:53:09.158Z",
+    "finishedAt": "2026-09-15T00:54:17.348Z",
+    "queuedMs": 5,
+    "durationMs": 68169,
+    "peakMemoryBytes": 107583898,
+    "cpuTimeMs": null,
+    "limits": {
+      "timeoutSeconds": 600,
+      "cpuCount": 2,
+      "memoryBytes": 2147483648,
+      "processes": 64,
+      "stdoutBytes": 1048576,
+      "stderrBytes": 1048576
+    },
+    "artifacts": [
+      {
+        "artifactId": "artifact_d1c5c25ab21e447ab6e58ff466a0536e",
+        "name": "chart.png",
+        "mimeType": "image/png",
+        "sizeBytes": 24713,
+        "sha256": "sha256:5b7bb58781b446f75df38e4bda45a5e51012aeb87ec71ad1c864350a364e6a98"
+      },
+      {
+        "artifactId": "artifact_bcbe962b725744cc98ec866d1da08070",
+        "name": "summary.csv",
+        "mimeType": "text/csv",
+        "sizeBytes": 541,
+        "sha256": "sha256:4f98ff4e50ebfc0cb65c45818510412f7bfabcf870e6b6ecc0c63afabea2a24c"
+      }
+    ],
+    "cleanupStatus": "succeeded"
+  },
+  "cancellationGate": {
+    "taskId": "task_6ff0f8a65c2b4e5da692f0873ccfd14f",
+    "runId": "run_bec6ee98b10e48819f65322e737f3079",
+    "status": "killed",
+    "errorCode": "CANCELLED",
+    "durationMs": 307,
+    "cleanupStatus": "succeeded"
+  },
+  "executorInterruptionGate": {
+    "exercised": true,
+    "mode": "SIGKILL the dedicated executor process while its sandbox container was running, then restart the executor against the same durable storage",
+    "taskId": "task_7c938fda68044ff29874bdf1ffa241e5",
+    "runId": "run_33b26bd58a6348e6a2ee1f8763a7dce2",
+    "statusBeforeInterruption": "running",
+    "orphanContainersBeforeRestart": 1,
+    "statusAfterRestart": "failed",
+    "errorCode": "WORKER_ERROR",
+    "errorMessage": "The sandbox worker restarted before execution completed.",
+    "cleanupStatus": "succeeded",
+    "artifactsAfterRestart": 0,
+    "orphanContainersAfterRestart": 0,
+    "startedAt": "2026-09-15T09:50:56.654Z",
+    "finishedAt": "2026-09-15T09:51:12.478Z"
+  },
+  "postRunContainers": 0,
+  "lidBehavior": {
+    "exercised": false,
+    "reason": "No forced sleep was performed on the user's active computer.",
+    "expected": "Closing the lid or sleeping macOS pauses or interrupts Colima. On executor restart, durable queued/running records are finalized as failed/WORKER_ERROR; the UI must not claim success.",
+    "nearestAutomatedEvidence": "The executorInterruptionGate above exercised the same persisted-run recovery path with a real running Docker container; physical lid/sleep behavior remains unclaimed."
+  }
+}

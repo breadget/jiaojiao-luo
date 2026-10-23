@@ -83,6 +83,11 @@ if [[ -f /etc/nginx/sites-available/urtoris.cn ]]; then
     "/etc/nginx/sites-available/urtoris.cn.before-$STAMP"
 fi
 install -m 0644 "$APP_DIR/deploy/urtoris.nginx.conf" /etc/nginx/sites-available/urtoris.cn
+install -d -m 0755 /etc/nginx/snippets
+install -m 0644 "$APP_DIR/deploy/nginx/urtoris-protection.conf" /etc/nginx/conf.d/urtoris-limits.conf
+for snippet in urtoris-proxy urtoris-site-guard urtoris-security-headers; do
+  install -m 0644 "$APP_DIR/deploy/nginx/$snippet.conf" "/etc/nginx/snippets/$snippet.conf"
+done
 ln -sfn /etc/nginx/sites-available/urtoris.cn /etc/nginx/sites-enabled/urtoris.cn
 
 systemctl daemon-reload

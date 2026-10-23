@@ -24,6 +24,8 @@ export const workflows = sqliteTable(
     createdAt: integer('created_at').notNull(),
     updatedAt: integer('updated_at').notNull(),
     publishedAt: integer('published_at'),
+    /** 从工作流列表删除时只隐藏，不级联清空历史运行、会话或发布快照。 */
+    deletedAt: integer('deleted_at'),
     n8nWebhookUrl: text('n8n_webhook_url'),
     /** 当前生效的 Graph 发布版本；回滚就是移动这个指针。 */
     activeGraphVersionId: text('active_graph_version_id'),
@@ -64,6 +66,92 @@ export const runs = sqliteTable(
     index('idx_runs_workflow_started_at').on(table.workflowId, table.startedAt),
     index('idx_runs_request_id').on(table.requestId),
     index('idx_runs_session_id').on(table.sessionId),
+  ],
+);
+
+/**
+ * 使用端的匿名浏览器会话。浏览器只保存高熵 HttpOnly token，
+ * D1 只保存其 SHA-256；每个已发布工作流有独立对话分区。
+ */
+export const consumerSessions = sqliteTable(
+  'consumer_sessions',
+  {
+    id: text('id').primaryKey(),
+    browserKeyHash: text('browser_key_hash').notNull(),
+    workflowId: text('workflow_id')
+      .notNull()
+      .references(() => workflows.id, { onDelete: 'cascade' }),
+    engineSessionId: text('engine_session_id').notNull(),
+    title: text('title').notNull().default('新对话'),
+    createdAt: integer('created_at').notNull(),
+    updatedAt: integer('updated_at').notNull(),
+  },
+  (table) => [
+    index('idx_consumer_sessions_browser_workflow_updated').on(
+      table.browserKeyHash,
+      table.workflowId,
+      table.updatedAt,
+    ),
+    index('idx_consumer_sessions_updated_at').on(table.updatedAt),
+  ],
+);
+
+export const consumerMessages = sqliteTable(
+  'consumer_messages',
+  {
+    id: text('id').primaryKey(),
+    sessionId: text('session_id')
+      .notNull()
+      .references(() => consumerSessions.id, { onDelete: 'cascade' }),
+    role: text('role', { enum: ['user', 'agent'] }).notNull(),
+    status: text('status', {
+      enum: ['working', 'completed', 'failed'],
+    }).notNull(),
+    text: text('text').notNull(),
+    metadataJson: text('metadata_json').notNull().default('{}'),
+    createdAt: integer('created_at').notNull(),
+    updatedAt: integer('updated_at').notNull(),
+  },
+  (table) => [
+    index('idx_consumer_messages_session_created').on(
+      table.sessionId,
+      table.createdAt,
+    ),
+  ],
+);
+
+export const consumerPythonRuns = sqliteTable(
+  'consumer_python_runs',
+  {
+    runId: text('run_id').primaryKey(),
+    sessionId: text('session_id')
+      .notNull()
+      .references(() => consumerSessions.id, { onDelete: 'cascade' }),
+    agentMessageId: text('agent_message_id').references(
+      () => consumerMessages.id,
+      { onDelete: 'set null' },
+    ),
+    taskId: text('task_id').notNull(),
+    attempt: integer('attempt').notNull(),
+    profile: text('profile', { enum: ['short', 'long'] }).notNull(),
+    status: text('status').notNull(),
+    errorCode: text('error_code'),
+    errorMessage: text('error_message'),
+    artifactsJson: text('artifacts_json').notNull().default('[]'),
+    metricsJson: text('metrics_json').notNull().default('{}'),
+    limitsJson: text('limits_json').notNull().default('{}'),
+    createdAt: integer('created_at').notNull(),
+    startedAt: integer('started_at'),
+    finishedAt: integer('finished_at'),
+    updatedAt: integer('updated_at').notNull(),
+  },
+  (table) => [
+    index('idx_consumer_python_runs_session_created').on(
+      table.sessionId,
+      table.createdAt,
+    ),
+    index('idx_consumer_python_runs_task').on(table.taskId),
+    index('idx_consumer_python_runs_status').on(table.status),
   ],
 );
 

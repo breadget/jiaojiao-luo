@@ -118,10 +118,13 @@ export function resolveInternalNodeId(
 function redactValue(value: unknown, depth = 0): { value: unknown; redacted: boolean } {
   if (value === null || value === undefined) return { value: null, redacted: false };
   if (typeof value === 'string') {
-    if (value.length > STRING_LIMIT_CHARS) {
-      return { value: `${value.slice(0, STRING_LIMIT_CHARS)}…`, redacted: true };
+    const text = value.replace(/\b(Bearer|Basic)\s+[A-Za-z0-9._~+/=-]+/gi, '$1 [redacted]')
+      .replace(/\b(?:sk-[A-Za-z0-9_-]+|ghp_[A-Za-z0-9]+)\b/g, '[redacted]')
+      .replace(/((?:api[_-]?key|password|token|secret)\s*[=:]\s*)[^\s,;"'}]+/gi, '$1[redacted]');
+    if (text.length > STRING_LIMIT_CHARS) {
+      return { value: `${text.slice(0, STRING_LIMIT_CHARS)}…`, redacted: true };
     }
-    return { value, redacted: false };
+    return { value: text, redacted: text !== value };
   }
   if (typeof value === 'number' || typeof value === 'boolean') {
     return { value, redacted: false };
@@ -225,6 +228,7 @@ export async function listTelemetryEvents(
     afterSeq?: number;
     limit?: number;
     bindings?: NodeBinding[];
+    executionId?: string;
   },
 ): Promise<TelemetryEvent[]> {
   const limit = Math.min(
@@ -237,11 +241,11 @@ export async function listTelemetryEvents(
       `SELECT rowid AS seq, request_id, session_id, execution_id, workflow,
               event_type, level, node, message, payload_json, duration_ms, created_at
        FROM n8n_events
-       WHERE request_id = ? AND rowid > ?
+       WHERE request_id = ? AND rowid > ?${options.executionId ? ' AND execution_id = ?' : ''}
        ORDER BY rowid ASC
        LIMIT ?`,
     )
-    .bind(options.requestId, afterSeq, limit)
+    .bind(...(options.executionId ? [options.requestId, afterSeq, options.executionId, limit] : [options.requestId, afterSeq, limit]))
     .all<TelemetryEventRow>();
   const bindings = options.bindings ?? [];
   return (result.results ?? []).map((row) => toTelemetryEvent(row, bindings));

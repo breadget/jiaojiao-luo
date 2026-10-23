@@ -9,6 +9,7 @@
  */
 
 import { DEFAULT_LLM_BASE_URL, DEFAULT_LLM_MODEL } from '@/lib/server/llm';
+import type { LlmReasoningEffort } from '@/lib/llm/providers';
 
 export const URTORIS_PROTOCOL = 'urtoris.v1';
 
@@ -94,6 +95,7 @@ export type UrtorisLlmConfig = {
   apiKey?: string;
   baseUrl?: string;
   model?: string;
+  reasoningEffort?: LlmReasoningEffort;
 };
 
 export type UrtorisRequestMeta = {
@@ -183,6 +185,7 @@ export function buildRequest(input: BuildRequestInput): UrtorisRequest {
       apiKey: input.llm.apiKey,
       baseUrl: input.llm.baseUrl || DEFAULT_LLM_BASE_URL,
       model: input.llm.model || DEFAULT_LLM_MODEL,
+      reasoningEffort: input.llm.reasoningEffort ?? 'auto',
     };
   }
 

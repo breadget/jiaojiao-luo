@@ -7,6 +7,7 @@
 - `n8n.service`：使用独立 `n8n` 用户，仅监听本机回环地址。
 - `migrate-service.py`：备份后迁移数据目录、环境变量和服务配置；失败时自动恢复。
 - `patch-observability.py`：在 ECS 内部修改新导出的工作流 JSON，不向本机复制生产工作流或凭据。
+- `patch-conversation-history.mjs`：对服务端已发布导出打补丁，让完整历史通过请求校验，W1 按真实角色传入全部历史，并移除固定的冒烟测试身份和 120 字回复限制。导入后必须重新 Publish 并通过真实 n8n 到模型的全链路验收。
 - `check-production.js`：只读检查发布状态、观测节点、执行保存设置和陈旧 `running`；可追加 execution ID 验证精确执行是否定稿。
 - `run-finalization-canary.sh`：并发运行 3 次无 Key W1，验证规则降级、映射唯一性与 SQLite 定稿。
 - `apply-runtime-guardrails.py`：备份环境文件后关闭未使用的 Public API、Swagger、社区包和模板市场；健康检查失败自动回滚。

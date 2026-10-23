@@ -120,11 +120,15 @@ describe('Workflow creator Agent 提案边界', () => {
     assert.deepEqual(compiled.requiredCredentialRefs, [
       'headerAuth',
       'openAiApi',
+      'urtorisEventsHeaderAuth',
     ]);
   });
 
   it('编辑时复用现有节点和连接 id，只统计真实变更', () => {
     const current = canaryGraph('wf_agent_edit');
+    const currentAgent = current.nodes.find((node) => node.type === 'aiAgent');
+    assert.ok(currentAgent);
+    currentAgent.config.constraints = '只能查询订单，不得删除数据。';
     const blueprint = {
       schemaVersion: 1,
       summary: '只收紧 Agent 的系统指令。',
@@ -172,6 +176,43 @@ describe('Workflow creator Agent 提案边界', () => {
       edgesAdded: 0,
       edgesRemoved: 0,
     });
+    assert.equal(
+      proposal.graph.nodes.find((node) => node.type === 'aiAgent')?.config
+        .constraints,
+      currentAgent.config.constraints,
+      '未修改的行为限制必须随编辑保留',
+    );
+  });
+
+  it('辅助 Agent 可以生成、修改和清空自然语言限制，并拒绝超长值', () => {
+    const blueprint = createBlueprint();
+    const agent = blueprint.nodes.find((node) => node.key === 'agent');
+    assert.ok(agent);
+    const config = agent.config as Record<string, unknown>;
+    for (const constraints of ['只能处理客服问题。', '不得修改数据。', '']) {
+      config.constraints = constraints;
+      const proposal = createWorkflowAgentProposal(JSON.stringify(blueprint), {
+        mode: 'create',
+      });
+      assert.equal(
+        proposal.graph.nodes.find((node) => node.type === 'aiAgent')?.config
+          .constraints,
+        constraints,
+      );
+    }
+    config.constraints = '限'.repeat(4_001);
+    assert.throws(
+      () =>
+        createWorkflowAgentProposal(JSON.stringify(blueprint), {
+          mode: 'create',
+        }),
+      WorkflowAgentProposalError,
+    );
+    const messages = buildWorkflowAgentMessages({
+      mode: 'create',
+      request: '限制 Agent 只处理客服问题',
+    });
+    assert.match(messages[0].content, /aiAgent\.config\.constraints/);
   });
 
   it('模型回显 legacyStepId 这类内部标记时不再报错，且以现有值为准', () => {

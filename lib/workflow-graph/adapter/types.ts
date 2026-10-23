@@ -28,6 +28,7 @@ export type N8nNode = {
   notes?: string;
   notesInFlow?: boolean;
   disabled?: boolean;
+  webhookId?: string;
   /** n8n 节点级失败策略；只允许 Adapter 显式编译的值进入产物。 */
   onError?: 'stopWorkflow' | 'continueRegularOutput' | 'continueErrorOutput';
 };
