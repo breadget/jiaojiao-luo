@@ -1,0 +1,274 @@
+{
+  "schemaVersion": 1,
+  "id": "wf_demo_triage",
+  "name": "客户请求分流（带会话记忆）",
+  "description": "Webhook 接收 { sessionId, question, channel, urgency }，由 Qwen Agent 结合按 sessionId 隔离的会话记忆完成分类、优先级、摘要与建议动作；高优先级直接回传人工升级，普通优先级回传自动处理建议。",
+  "revision": 1,
+  "nodes": [
+    {
+      "id": "node_step_intake",
+      "type": "trigger",
+      "name": "读取客户请求（Webhook）",
+      "description": "POST Webhook，请求体契约：{ sessionId: string, question: string, channel: string, urgency: 'high' | 'normal' }。sessionId 同时是会话语义的分区键，缺 sessionId 或 question 视为无效请求。",
+      "position": { "x": 80, "y": 150 },
+      "ports": [
+        {
+          "id": "main.out",
+          "label": "Main",
+          "kind": "main",
+          "direction": "output",
+          "required": true,
+          "maxConnections": null
+        }
+      ],
+      "config": {
+        "trigger": "webhook",
+        "authPolicy": "urtoris-token",
+        "legacyStepId": "step_intake",
+        "legacyStepKind": "input"
+      }
+    },
+    {
+      "id": "node_step_summary",
+      "type": "aiAgent",
+      "name": "AI 分析工单",
+      "description": "调用 Qwen（可带会话记忆）分析问题，输出分类、优先级、摘要和建议动作；不做任何执行动作。",
+      "position": { "x": 360, "y": 150 },
+      "ports": [
+        {
+          "id": "main.in",
+          "label": "Main",
+          "kind": "main",
+          "direction": "input",
+          "required": true,
+          "maxConnections": 1
+        },
+        {
+          "id": "main.out",
+          "label": "Main",
+          "kind": "main",
+          "direction": "output",
+          "required": false,
+          "maxConnections": null
+        },
+        {
+          "id": "resource.model",
+          "label": "Model",
+          "kind": "model",
+          "direction": "output",
+          "required": true,
+          "maxConnections": 1
+        },
+        {
+          "id": "resource.memory",
+          "label": "Memory",
+          "kind": "memory",
+          "direction": "output",
+          "required": false,
+          "maxConnections": 1
+        },
+        {
+          "id": "resource.tools",
+          "label": "Tools",
+          "kind": "tool",
+          "direction": "output",
+          "required": false,
+          "maxConnections": null
+        }
+      ],
+      "config": {
+        "strategy": "tools",
+        "instructions": "你是客服工单分析助手，只做分析与建议，不执行任何动作，也不调用工具。\n\n输入来自 Webhook JSON：\n- sessionId：会话标识（用于多轮记忆）\n- question：用户问题原文\n- channel：来源渠道\n- urgency：用户声明的紧急程度（high / normal）\n\n必须只返回一个 JSON 对象，不要输出解释、前缀或 Markdown 代码块，字段固定为：\n{\"classification\":\"问题分类\",\"priority\":\"high 或 normal\",\"summary\":\"一句话摘要\",\"suggestedAction\":\"建议动作\"}\n\n判定规则：\n- priority 为 high：涉及资金、账号安全、服务中断，用户明确要求立即处理，或 urgency 为 high。\n- 其余为 normal。\n- priority 为 high 时，suggestedAction 必须以「需要人工立即处理」开头。\n- priority 为 normal 时，suggestedAction 必须是可以直接自动执行的处理建议。\n- 信息不足时不要编造：classification 用「其他」，并在 summary 中说明缺少哪些信息。\n- 模型不可用或无法判断时必须报错，不要输出猜测结果，也不要退化成固定规则结论。",
+        "prompt": "JSON.stringify({ sessionId: $json.sessionId, question: $json.question, channel: $json.channel, urgency: $json.urgency })",
+        "maxIterations": 6,
+        "fallbackPolicy": "error",
+        "legacyStepId": "step_summary",
+        "legacyStepKind": "compose"
+      }
+    },
+    {
+      "id": "node_step_priority",
+      "type": "condition",
+      "name": "判断优先级",
+      "description": "按 Agent 给出的 priority 分流：high 走人工立即处理，其余走自动处理建议。表达式同时容忍 Agent 直接给出 priority 字段或把 JSON 放在 output 字符串里的两种形态。",
+      "position": { "x": 640, "y": 150 },
+      "ports": [
+        {
+          "id": "main.in",
+          "label": "Main",
+          "kind": "main",
+          "direction": "input",
+          "required": true,
+          "maxConnections": 1
+        },
+        {
+          "id": "branch.true",
+          "label": "true",
+          "kind": "branch",
+          "direction": "output",
+          "required": true,
+          "maxConnections": null
+        },
+        {
+          "id": "branch.false",
+          "label": "false",
+          "kind": "branch",
+          "direction": "output",
+          "required": true,
+          "maxConnections": null
+        }
+      ],
+      "config": {
+        "expression": "$json.priority === \"high\" || (typeof $json.output === \"string\" && /\"priority\"\\s*:\\s*\"high\"/.test($json.output))",
+        "legacyStepId": "step_priority",
+        "legacyStepKind": "decision"
+      }
+    },
+    {
+      "id": "node_step_return",
+      "type": "output",
+      "name": "回传到使用端（自动处理建议）",
+      "description": "普通优先级：把结构化结果（分类、优先级、摘要、建议动作）回传给使用端，由使用端按建议自动处理。",
+      "position": { "x": 920, "y": 150 },
+      "ports": [
+        {
+          "id": "main.in",
+          "label": "Main",
+          "kind": "main",
+          "direction": "input",
+          "required": true,
+          "maxConnections": null
+        }
+      ],
+      "config": {
+        "envelope": "urtoris.v1",
+        "legacyStepId": "step_return",
+        "legacyStepKind": "output"
+      }
+    },
+    {
+      "id": "node_human_escalation",
+      "type": "output",
+      "name": "输出：需要人工立即处理",
+      "description": "高优先级：回传人工升级结果，等待人工介入，不自动执行任何动作。",
+      "position": { "x": 920, "y": 390 },
+      "ports": [
+        {
+          "id": "main.in",
+          "label": "Main",
+          "kind": "main",
+          "direction": "input",
+          "required": true,
+          "maxConnections": null
+        }
+      ],
+      "config": {
+        "envelope": "urtoris.v1"
+      }
+    },
+    {
+      "id": "node_step_summary_model",
+      "type": "llmModel",
+      "name": "Qwen Model",
+      "description": "OpenAI 兼容的 Qwen 模型（qwen-plus）；凭证由运维在使用端挂载，草稿里只保存引用。",
+      "position": { "x": 240, "y": 430 },
+      "ports": [
+        {
+          "id": "model.provider",
+          "label": "Model",
+          "kind": "model",
+          "direction": "input",
+          "required": false,
+          "maxConnections": 1
+        }
+      ],
+      "config": {
+        "provider": "qwen",
+        "model": "qwen-plus",
+        "allowBringYourOwnKey": true
+      }
+    },
+    {
+      "id": "node_step_summary_memory",
+      "type": "memory",
+      "name": "Window Memory",
+      "description": "窗口记忆，按 Webhook 的 sessionId 隔离会话；同一 sessionId 复用上下文，不同 sessionId 互不可见。",
+      "position": { "x": 470, "y": 430 },
+      "ports": [
+        {
+          "id": "memory.provider",
+          "label": "Memory",
+          "kind": "memory",
+          "direction": "input",
+          "required": false,
+          "maxConnections": 1
+        }
+      ],
+      "config": {
+        "provider": "window",
+        "maxTurns": 12,
+        "sessionKey": "sessionId"
+      }
+    }
+  ],
+  "edges": [
+    {
+      "id": "edge_node_step_intake_main_out_node_step_summary_main_in",
+      "kind": "main",
+      "source": { "nodeId": "node_step_intake", "portId": "main.out" },
+      "target": { "nodeId": "node_step_summary", "portId": "main.in" }
+    },
+    {
+      "id": "edge_node_step_summary_main_out_node_step_priority_main_in",
+      "kind": "main",
+      "source": { "nodeId": "node_step_summary", "portId": "main.out" },
+      "target": { "nodeId": "node_step_priority", "portId": "main.in" }
+    },
+    {
+      "id": "edge_node_step_priority_branch_true_node_human_escalation_main_in",
+      "kind": "branch",
+      "label": "true",
+      "condition": { "branch": "true" },
+      "source": { "nodeId": "node_step_priority", "portId": "branch.true" },
+      "target": { "nodeId": "node_human_escalation", "portId": "main.in" }
+    },
+    {
+      "id": "edge_node_step_priority_branch_false_node_step_return_main_in",
+      "kind": "branch",
+      "label": "false",
+      "condition": { "branch": "false" },
+      "source": { "nodeId": "node_step_priority", "portId": "branch.false" },
+      "target": { "nodeId": "node_step_return", "portId": "main.in" }
+    },
+    {
+      "id": "edge_node_step_summary_resource_model_node_step_summary_model_model_provider",
+      "kind": "model",
+      "source": { "nodeId": "node_step_summary", "portId": "resource.model" },
+      "target": { "nodeId": "node_step_summary_model", "portId": "model.provider" }
+    },
+    {
+      "id": "edge_node_step_summary_resource_memory_node_step_summary_memory_memory_provider",
+      "kind": "memory",
+      "source": { "nodeId": "node_step_summary", "portId": "resource.memory" },
+      "target": { "nodeId": "node_step_summary_memory", "portId": "memory.provider" }
+    }
+  ],
+  "entryNodeIds": ["node_step_intake"],
+  "runtime": {
+    "engine": "n8n",
+    "adapter": "n8n-v1",
+    "executionMode": "webhook",
+    "binding": "draft"
+  },
+  "viewport": { "x": 0, "y": 0, "zoom": 0.82 },
+  "metadata": {
+    "source": "urtoris",
+    "updatedAt": 1789171200000
+  },
+  "extensions": {
+    "draftNote": "由 Codex 生成的草稿变更，未发布、未激活、未导入 n8n。",
+    "preservedNodeIds": ["node_step_intake", "node_step_summary", "node_step_priority", "node_step_return"],
+    "droppedPlaceholderNodeIds": ["node_step_summary_http_tool", "node_step_summary_robot_tool", "node_step_0117af28"],
+    "droppedReason": "这三类节点在 Adapter v1 里没有 n8n 映射（tool 需要真实 url / implementation=robot 不支持，transform 不支持），保留会让编译预览直接失败；需要时按真实 URL 与动作清单再加回。"
+  }
+}

@@ -1,0 +1,49 @@
+name: Import OpenBot
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  import-openbot:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Clone OpenBot
+        run: |
+          git clone --depth 1 --branch master --single-branch https://github.com/ob-f/OpenBot.git openbot
+
+      - name: Prepare OpenBot
+        run: |
+          cd openbot
+
+          # 保存 OpenBot 自带的 GitHub Actions 文件，
+          # 但避免放在 .github/workflows 下触发 GitHub 权限限制
+          if [ -d ".github/workflows" ]; then
+            mkdir -p openbot-upstream-workflows
+            cp -r .github/workflows/. openbot-upstream-workflows/
+            rm -rf .github/workflows
+          fi
+
+          # 去掉 OpenBot 原来的 Git 历史
+          rm -rf .git
+
+          # 重新建立一个干净的 Git 仓库
+          git init
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add .
+          git commit -m "Import OpenBot"
+
+      - name: Push OpenBot to branch
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          cd openbot
+
+          git remote add target "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+
+          git push target HEAD:refs/heads/openbot --force

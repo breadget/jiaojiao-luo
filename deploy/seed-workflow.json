@@ -1,0 +1,12 @@
+{
+  "id": "wf_demo_triage",
+  "name": "客服问题分流",
+  "description": "把用户问题整理、标注并生成下一步建议。",
+  "action": "publish",
+  "steps": [
+    { "id": "step-1", "title": "接收问题", "kind": "input", "detail": "收集用户的原始问题" },
+    { "id": "step-2", "title": "提取关键信息", "kind": "transform", "detail": "整理主题、紧急程度与上下文" },
+    { "id": "step-3", "title": "分配处理队列", "kind": "decision", "detail": "根据主题选择对应处理队列" },
+    { "id": "step-4", "title": "生成下一步建议", "kind": "output", "detail": "输出可执行的回复与跟进动作" }
+  ]
+}

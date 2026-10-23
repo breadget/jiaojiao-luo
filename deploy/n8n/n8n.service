@@ -1,0 +1,25 @@
+[Unit]
+Description=n8n workflow automation
+Documentation=https://docs.n8n.io
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=n8n
+Group=n8n
+WorkingDirectory=/var/lib/n8n
+EnvironmentFile=/opt/n8n/.env
+Environment=NODE_OPTIONS=--max-old-space-size=768
+ExecStart=/usr/bin/n8n start
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=90
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+
+[Install]
+WantedBy=multi-user.target

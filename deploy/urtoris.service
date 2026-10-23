@@ -1,0 +1,22 @@
+[Unit]
+Description=Urtoris workflow application
+After=network.target
+
+[Service]
+Type=simple
+User=urtoris
+Group=urtoris
+WorkingDirectory=/opt/urtoris/app
+Environment=NODE_ENV=production
+Environment=HOME=/var/lib/urtoris
+ExecStart=/usr/bin/node /opt/urtoris/app/node_modules/wrangler/bin/wrangler.js dev --config /opt/urtoris/app/dist/server/wrangler.json --env-file /opt/urtoris/app/.dev.vars --ip 127.0.0.1 --port 3000 --persist-to /var/lib/urtoris/data
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+ReadWritePaths=/var/lib/urtoris /var/log/urtoris /opt/urtoris/app/.wrangler
+
+[Install]
+WantedBy=multi-user.target

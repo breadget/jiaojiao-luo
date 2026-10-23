@@ -1,0 +1,76 @@
+{
+  "graphHash": "0819ac92501db7b8a9d13dc71e3e49aa1fc24b8816e0f2e3d69d628a2dfd1145",
+  "compiledHash": "3f711e2b4468260797e63b15c0135c0cf39bb73867f54b600c680deb449e7229",
+  "bindings": [
+    {
+      "internalNodeId": "node_trigger",
+      "externalNodeId": "950ff7e6-1da4-10e5-a50e-8d31f7e86ba8",
+      "externalNodeName": "U::node_trigger::primary",
+      "role": "primary"
+    },
+    {
+      "internalNodeId": "node_trigger",
+      "externalNodeId": "4be96301-5ad5-64f7-e2d7-10eae49631f0",
+      "externalNodeName": "U::node_trigger::input",
+      "role": "input"
+    },
+    {
+      "internalNodeId": "node_route",
+      "externalNodeId": "56d5d8dc-445d-59fa-190d-668dc3342946",
+      "externalNodeName": "U::node_route::primary",
+      "role": "primary"
+    },
+    {
+      "internalNodeId": "node_agent",
+      "externalNodeId": "dc1103ff-4e74-df72-1c05-447671b3d571",
+      "externalNodeName": "U::node_agent::primary",
+      "role": "primary"
+    },
+    {
+      "internalNodeId": "node_model",
+      "externalNodeId": "4b65dfd5-da8a-b16f-9752-43a9a17d4b53",
+      "externalNodeName": "U::node_model::model",
+      "role": "model"
+    },
+    {
+      "internalNodeId": "node_memory",
+      "externalNodeId": "451e343d-b0f1-283a-656a-60d17911b2d9",
+      "externalNodeName": "U::node_memory::memory",
+      "role": "memory"
+    },
+    {
+      "internalNodeId": "node_tool",
+      "externalNodeId": "cf09a06d-3b6b-91cf-116d-3497ff47ab86",
+      "externalNodeName": "U::node_tool::tool",
+      "role": "tool"
+    },
+    {
+      "internalNodeId": "node_robot",
+      "externalNodeId": "4da9f54b-4bab-27a4-30b7-7d98907d5dc5",
+      "externalNodeName": "U::node_robot::primary",
+      "role": "primary"
+    },
+    {
+      "internalNodeId": "node_http",
+      "externalNodeId": "3ccbdc4b-7e2e-fb95-4243-714fa846e84e",
+      "externalNodeName": "U::node_http::primary",
+      "role": "primary"
+    },
+    {
+      "internalNodeId": "node_out",
+      "externalNodeId": "0c73e5bd-3564-dfdd-882b-4f6ed8713e17",
+      "externalNodeName": "U::node_out::primary",
+      "role": "primary"
+    },
+    {
+      "internalNodeId": "node_out",
+      "externalNodeId": "87f23c22-26a4-4b9a-1f5e-e3b2e0d1194e",
+      "externalNodeName": "U::node_out::envelope",
+      "role": "envelope"
+    }
+  ],
+  "requiredCredentialRefs": [
+    "headerAuth",
+    "openAiApi"
+  ]
+}
