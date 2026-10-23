@@ -58,4 +58,4 @@
 
 ## 当前分支
 
-`main` 导入自原始提交 `4ab2148912c4943fea462fd6ad84558e8e40c422`，保留该提交的文件快照，并补充本来源说明与 README 提示。
+`codex/toolchain-w4-ssrf-fix` 导入自原始提交 `a4905cf0f128a76aea7e6054ee2ebe33acef8ce4`，保留该提交的文件快照，并补充本来源说明与 README 提示。
