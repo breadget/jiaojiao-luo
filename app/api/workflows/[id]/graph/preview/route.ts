@@ -1,4 +1,8 @@
-import { guardAdminRequest, jsonResponse, routeWorkflowId } from '@/lib/server/graph-api';
+import {
+  guardAdminRequest,
+  jsonResponse,
+  routeWorkflowId,
+} from '@/lib/server/graph-api';
 import {
   GRAPH_JSON_LIMIT_BYTES,
   findCredentialMaterial,
@@ -86,6 +90,6 @@ export async function POST(
     stats: preview.stats,
     // 明确告诉前端：这里只是预览，部署仍然锁定
     imported: false,
-    adapterLocked: true,
+    adapterLocked: preview.adapter !== 'local-sqlite',
   });
 }

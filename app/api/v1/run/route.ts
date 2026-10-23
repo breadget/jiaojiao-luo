@@ -1,4 +1,5 @@
 import { env } from 'cloudflare:workers';
+import { isLlmReasoningEffort } from '@/lib/llm/providers';
 
 import { callN8nWorkflow } from '@/lib/server/n8n';
 import {
@@ -23,6 +24,9 @@ import {
   getWorkflowById,
 } from '@/lib/server/workflow-store';
 import { enforceRateLimit, readJsonObject } from '@/lib/server/security';
+import { getActiveWorkflowVersion } from '@/lib/server/workflow-version-store';
+import { hasAgentConstraints } from '@/lib/workflow-graph/agent-constraints';
+import { hasLocalDatabaseNodes } from '@/lib/workflow-graph/local-database';
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
@@ -50,6 +54,9 @@ function readLlmConfig(body: Record<string, unknown>): UrtorisLlmConfig | null {
       typeof record.model === 'string' && record.model.trim()
         ? record.model.trim()
         : DEFAULT_LLM_MODEL,
+    reasoningEffort: isLlmReasoningEffort(record.reasoningEffort)
+      ? record.reasoningEffort
+      : 'auto',
   };
 }
 
@@ -121,6 +128,14 @@ export async function POST(request: Request) {
 
   const message =
     typeof body.message === 'string' ? body.message.trim().slice(0, 2000) : '';
+
+  const publishedGraph = (await getActiveWorkflowVersion(workflow.id))?.graph;
+  if (publishedGraph && hasLocalDatabaseNodes(publishedGraph)) {
+    return Response.json(
+      { ok: false, error: '本机数据库工作流需要浏览器连接助手，请在对话中运行。', errorCode: 'LOCAL_DATABASE_BROWSER_REQUIRED' },
+      { status: 409, headers: corsHeaders },
+    );
+  }
 
   // 绑定了 n8n 的工作流走统一协议；调用方拿到的永远是同一个信封。
   if (workflow.n8nWebhookUrl) {
@@ -245,6 +260,18 @@ export async function POST(request: Request) {
         }
       }
     }
+  }
+
+  if (hasAgentConstraints(publishedGraph)) {
+    return Response.json(
+      {
+        ok: false,
+        error:
+          '当前工作流的 Agent 配置了自然语言行为限制，模拟执行无法应用这些限制。请通过真实模型或已部署的工作流执行。',
+        errorCode: 'AGENT_CONSTRAINTS_REQUIRE_MODEL',
+      },
+      { status: 409, headers: corsHeaders },
+    );
   }
 
   const run = await createCompletedRun(workflow);

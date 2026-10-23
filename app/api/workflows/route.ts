@@ -100,5 +100,9 @@ export async function POST(request: Request) {
     n8nWebhookUrl,
   });
 
+  if (!workflow) {
+    return Response.json({ error: '工作流不存在或已删除。' }, { status: 404 });
+  }
+
   return Response.json({ workflow });
 }

@@ -72,9 +72,9 @@ export type WorkflowGraphV1 = {
   edges: WorkflowGraphEdge[];
   entryNodeIds: string[];
   runtime: {
-    engine: 'n8n';
-    adapter: 'n8n-v1';
-    executionMode: 'webhook';
+    engine: 'n8n' | 'local-sqlite';
+    adapter: 'n8n-v1' | 'local-sqlite';
+    executionMode: 'webhook' | 'browser';
     binding: 'external' | 'draft';
   };
   viewport: { x: number; y: number; zoom: number };

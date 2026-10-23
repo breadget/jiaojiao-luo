@@ -1,4 +1,8 @@
-import { guardAdminRequest, jsonResponse, routeWorkflowId } from '@/lib/server/graph-api';
+import {
+  guardAdminRequest,
+  jsonResponse,
+  routeWorkflowId,
+} from '@/lib/server/graph-api';
 import { getWorkflowById } from '@/lib/server/workflow-store';
 import { GraphRevisionConflict } from '@/lib/server/workflow-graph-store';
 import {
@@ -39,7 +43,8 @@ export async function POST(
     typeof expectedRevision !== 'number' ||
     !Number.isInteger(expectedRevision) ||
     expectedRevision < 0 ||
-    (expectedGraphHash !== undefined && typeof expectedGraphHash !== 'string') ||
+    (expectedGraphHash !== undefined &&
+      typeof expectedGraphHash !== 'string') ||
     (webhookPath !== undefined && typeof webhookPath !== 'string')
   ) {
     return jsonResponse({ error: 'expectedRevision 无效。' }, 400);
@@ -60,24 +65,20 @@ export async function POST(
       version: result.version,
       issues: result.issues,
       imported: false,
-      adapterLocked: true,
+      adapterLocked: result.version.adapter !== 'local-sqlite',
     });
   } catch (cause) {
     if (cause instanceof GraphRevisionConflict) {
       return jsonResponse(
         {
-          error:
-            'Graph 草稿已变化（或本地有未保存修改），请重新载入后再发布。',
+          error: 'Graph 草稿已变化（或本地有未保存修改），请重新载入后再发布。',
           currentRevision: cause.currentRevision,
         },
         409,
       );
     }
     if (cause instanceof GraphPublishRejected) {
-      return jsonResponse(
-        { error: cause.message, issues: cause.issues },
-        422,
-      );
+      return jsonResponse({ error: cause.message, issues: cause.issues }, 422);
     }
     throw cause;
   }

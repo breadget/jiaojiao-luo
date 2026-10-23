@@ -1,0 +1,108 @@
+{% load static %}
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <meta name="theme-color" content="#111214">
+  <title>数据结构与算法助教</title>
+  <link rel="stylesheet" href="{% static 'tutor/app.css' %}">
+  <script src="{% static 'tutor/app.js' %}" defer></script>
+</head>
+<body>
+  <a class="skip-link" href="#question">跳到提问</a>
+  <div class="workspace">
+    <aside class="sidebar" aria-label="课程与知识库">
+      <div class="brand">
+        <svg class="brand-mark" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M12 5.5c-2.7-2-5.5-2-9-1v14c3.5-1 6.3-1 9 1 2.7-2 5.5-2 9-1v-14c-3.5-1-6.3-1-9 1Z" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/><path d="M12 5.5v14" stroke="currentColor" stroke-width="1.5"/></svg>
+        <h1>数据结构与算法<span>助教</span></h1>
+      </div>
+
+      <section class="knowledge-section" aria-labelledby="knowledge-heading">
+        <h2 id="knowledge-heading">课程知识库</h2>
+        <div class="knowledge-status" id="knowledge-status"><span class="status-dot" aria-hidden="true"></span><span id="status-label">待检查</span></div>
+        <p class="sidebar-description" id="knowledge-description">回答会附上文档中的原文依据。</p>
+        <ul class="document-list" id="document-list" aria-label="已索引的文档"></ul>
+        <p class="knowledge-counts" id="knowledge-counts" hidden></p>
+      </section>
+
+      <section class="sample-section" aria-labelledby="samples-heading" hidden>
+        <h2 id="samples-heading">试着问</h2>
+        <div class="sample-list">
+          <button type="button" class="sample-question" data-question="队列的入队和出队时间复杂度是多少？"><span>队列的入队和出队有多快？</span><svg viewBox="0 0 20 20" fill="none" aria-hidden="true"><path d="m8 5 5 5-5 5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+          <button type="button" class="sample-question" data-question="顺序表和链表有什么区别？"><span>顺序表与链表怎么选？</span><svg viewBox="0 0 20 20" fill="none" aria-hidden="true"><path d="m8 5 5 5-5 5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+          <button type="button" class="sample-question" data-question="栈和队列有什么区别？"><span>栈和队列有什么区别？</span><svg viewBox="0 0 20 20" fill="none" aria-hidden="true"><path d="m8 5 5 5-5 5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+          <button type="button" class="sample-question" data-question="KMP 算法中的 next 数组有什么作用？"><span>KMP 的 next 数组有什么用？</span><svg viewBox="0 0 20 20" fill="none" aria-hidden="true"><path d="m8 5 5 5-5 5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+        </div>
+      </section>
+
+      <div class="sidebar-footer">
+        <p id="model-status">根据课程文档回答</p>
+        <details class="setup-help" id="setup-help">
+          <summary>运行与配置</summary>
+          <div class="setup-content">
+            <p>知识库未就绪时，在项目目录建立索引：</p>
+            <code>python manage.py index_knowledge</code>
+            <p>需要大模型组织回答时，在 <code>.env</code> 中配置 <code>OPENAI_API_KEY</code>、<code>OPENAI_BASE_URL</code> 和 <code>MODEL_NAME</code>，然后重启服务。</p>
+            <p>未配置大模型时，仍可检索并查看原文。</p>
+          </div>
+        </details>
+      </div>
+    </aside>
+
+    <main class="main-workspace" aria-label="知识库问答">
+      <header class="main-header">
+        <span>知识库问答</span>
+        <button type="button" class="clear-button" id="clear-conversation" hidden>清空本页</button>
+      </header>
+
+      <div class="chat-stage" id="chat-stage">
+        <div class="welcome" id="welcome" {% if result %}hidden{% endif %}>
+          <h2>从哪个知识点开始？</h2>
+        </div>
+        <div class="conversation" id="conversation" aria-label="本页问答记录">
+          {% if result %}
+          <article class="exchange">
+            <div class="question-message"><h2 class="sr-only">你的问题</h2><p>{{ result.question }}</p></div>
+            <section class="answer-message" aria-label="助教回答">
+              <div class="answer-heading"><span class="assistant-label">助教</span>{% if result.mode == 'retrieval_only' %}<span class="mode-label">仅展示检索原文</span>{% endif %}</div>
+              <div class="answer-text">{{ result.answer }}</div>
+              {% if result.warning %}<p class="answer-warning">{{ result.warning }}</p>{% endif %}
+              {% if result.sources %}
+              <details class="source-panel">
+                <summary><span>来源依据</span><span class="source-count">{{ result.sources|length }} 个片段</span><svg viewBox="0 0 20 20" fill="none" aria-hidden="true"><path d="m5 8 5 5 5-5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg></summary>
+                <div class="source-list">
+                  {% for source in result.sources %}
+                  <section class="source-item" aria-label="来源 {{ forloop.counter }}">
+                    <div class="source-heading"><h3><span class="source-number">[{{ forloop.counter }}]</span> {{ source.filename }}</h3>{% if source.page %}<span class="source-page">第 {{ source.page }} 页</span>{% endif %}</div>
+                    <blockquote>{{ source.excerpt }}</blockquote>
+                  </section>
+                  {% endfor %}
+                </div>
+              </details>
+              {% endif %}
+            </section>
+          </article>
+          {% endif %}
+        </div>
+      </div>
+
+      <div class="composer-area">
+        <div class="form-error" id="form-error" role="alert" {% if not error %}hidden{% endif %}>{{ error|default:'' }}</div>
+        <form class="question-form" id="question-form" method="post" action="/">
+          {% csrf_token %}
+          <label class="sr-only" for="question">输入你想了解的数据结构与算法问题</label>
+          <textarea id="question" name="question" rows="3" maxlength="2000" placeholder="输入你想了解的问题…" required>{{ question|default:'' }}</textarea>
+          <div class="composer-controls">
+            <p class="composer-hint" id="composer-hint" hidden>Enter 换行 · Ctrl / ⌘ + Enter 提问</p>
+            <button class="submit-button" type="submit" id="submit-question"><span>提问</span><svg viewBox="0 0 20 20" fill="none" aria-hidden="true"><path d="M10 15V5m-4 4 4-4 4 4" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+          </div>
+        </form>
+        <p class="request-status" id="request-status" role="status" aria-live="polite"></p>
+        <noscript><p class="noscript-note">可以直接提交问题。启用 JavaScript 后可查看知识库状态并连续提问。</p></noscript>
+      </div>
+    </main>
+  </div>
+</body>
+</html>

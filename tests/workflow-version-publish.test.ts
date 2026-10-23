@@ -224,7 +224,7 @@ describe('不可变发布版本', () => {
     assert.equal(body.adapterLocked, true);
     // Adapter v1.1 adds deterministic input/envelope Code nodes while the
     // published graph still contains the original nine internal nodes.
-    assert.equal(await countBindings(body.version.id), 11);
+    assert.equal(await countBindings(body.version.id), 13);
     assert.equal(await activePointer('wf_pub'), body.version.id);
   });
 

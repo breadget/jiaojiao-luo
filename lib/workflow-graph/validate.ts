@@ -3,6 +3,12 @@ import type {
   WorkflowGraphV1,
   WorkflowPort,
 } from '@/lib/workflow-graph/types';
+import { validateAgentConstraints } from '@/lib/workflow-graph/agent-constraints';
+import {
+  hasLocalDatabaseNodes,
+  isLocalDatabaseNode,
+  validateLocalDatabaseConfig,
+} from '@/lib/workflow-graph/local-database';
 
 export type GraphIssue = {
   level: 'error' | 'warning';
@@ -166,6 +172,17 @@ export function validateGraph(graph: WorkflowGraphV1): GraphIssue[] {
   }
 
   for (const node of graph.nodes) {
+    if (!node.disabled && isLocalDatabaseNode(node)) {
+      const databaseError = validateLocalDatabaseConfig(node.config, {
+        allowIncomplete: true,
+      });
+      if (databaseError)
+        issues.push({
+          level: 'error',
+          message: databaseError,
+          nodeId: node.id,
+        });
+    }
     if (!node.name.trim()) {
       issues.push({
         level: 'error',
@@ -180,11 +197,13 @@ export function validateGraph(graph: WorkflowGraphV1): GraphIssue[] {
         port.direction === 'output'
           ? graph.edges.filter(
               (edge) =>
-                edge.source.nodeId === node.id && edge.source.portId === port.id,
+                edge.source.nodeId === node.id &&
+                edge.source.portId === port.id,
             ).length
           : graph.edges.filter(
               (edge) =>
-                edge.target.nodeId === node.id && edge.target.portId === port.id,
+                edge.target.nodeId === node.id &&
+                edge.target.portId === port.id,
             ).length;
       if (used > port.maxConnections) {
         issues.push({
@@ -196,6 +215,16 @@ export function validateGraph(graph: WorkflowGraphV1): GraphIssue[] {
     }
 
     if (node.type === 'aiAgent') {
+      const constraintsError = validateAgentConstraints(
+        node.config.constraints,
+      );
+      if (constraintsError) {
+        issues.push({
+          level: 'error',
+          message: constraintsError,
+          nodeId: node.id,
+        });
+      }
       if (!hasConnection(graph, node.id, 'resource.model')) {
         issues.push({
           level: 'error',
@@ -203,7 +232,10 @@ export function validateGraph(graph: WorkflowGraphV1): GraphIssue[] {
           nodeId: node.id,
         });
       }
-      if (!hasConnection(graph, node.id, 'resource.memory')) {
+      if (
+        !hasConnection(graph, node.id, 'resource.memory') &&
+        !hasLocalDatabaseNodes(graph)
+      ) {
         issues.push({
           level: 'warning',
           message: 'Agent 尚未连接 Memory，多轮对话不会保留上下文。',

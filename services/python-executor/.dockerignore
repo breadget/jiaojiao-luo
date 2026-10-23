@@ -1,0 +1,6 @@
+*
+!Dockerfile
+!image/validate_png.py
+!image/validate_xlsx.py
+!image/validate_pdf.py
+!image/validate_ooxml.py

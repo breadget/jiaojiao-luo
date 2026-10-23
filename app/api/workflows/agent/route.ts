@@ -1,8 +1,6 @@
 import { jsonResponse } from '@/lib/server/graph-api';
-import {
-  callChatModel,
-  resolveLlmSelection,
-} from '@/lib/server/llm';
+import { isLlmReasoningEffort } from '@/lib/llm/providers';
+import { callChatModel, resolveLlmSelection } from '@/lib/server/llm';
 import { getWorkflowById } from '@/lib/server/workflow-store';
 import {
   buildWorkflowAgentMessages,
@@ -71,10 +69,22 @@ export async function POST(request: Request) {
   const provider = optionalString(body.provider, 40);
   const baseUrl = optionalString(body.baseUrl, 500);
   const model = optionalString(body.model, 120);
+  const reasoningEffort =
+    body.reasoningEffort === undefined
+      ? 'auto'
+      : isLlmReasoningEffort(body.reasoningEffort)
+        ? body.reasoningEffort
+        : null;
 
   if (!mode || !prompt || prompt.length < 5) {
     return jsonResponse(
       { error: '请选择新建/编辑模式，并用至少 5 个字说明需求。' },
+      400,
+    );
+  }
+  if (!reasoningEffort) {
+    return jsonResponse(
+      { error: '推理强度只能是 auto、low、medium 或 high。' },
       400,
     );
   }
@@ -137,6 +147,7 @@ export async function POST(request: Request) {
     provider: selection.selection.providerId,
     baseUrl: selection.selection.baseUrl,
     model: selection.selection.model,
+    reasoningEffort,
     messages,
     temperature: 0.1,
     timeoutMs: 60_000,

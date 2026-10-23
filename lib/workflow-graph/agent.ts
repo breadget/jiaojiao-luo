@@ -22,6 +22,12 @@ import {
   type GraphIssue,
 } from '@/lib/workflow-graph/validate';
 import { randomId } from '@/lib/random-id';
+import { AGENT_CONSTRAINTS_MAX_LENGTH } from '@/lib/workflow-graph/agent-constraints';
+import {
+  LOCAL_DATABASE_PATH_MAX_LENGTH,
+  LOCAL_DATABASE_MAX_ROWS,
+  hasLocalDatabaseNodes,
+} from '@/lib/workflow-graph/local-database';
 
 export type WorkflowAgentMode = 'create' | 'edit';
 
@@ -107,6 +113,11 @@ const configRules: Partial<Record<StudioNodeType, Record<string, ConfigRule>>> =
     aiAgent: {
       strategy: { kind: 'string', max: 32, values: ['tools'] },
       instructions: { kind: 'string', max: 4_000 },
+      constraints: {
+        kind: 'string',
+        max: AGENT_CONSTRAINTS_MAX_LENGTH,
+        allowEmpty: true,
+      },
       prompt: { kind: 'string', max: 800 },
       maxIterations: { kind: 'integer', min: 1, max: 50 },
       fallbackPolicy: {
@@ -162,10 +173,18 @@ const configRules: Partial<Record<StudioNodeType, Record<string, ConfigRule>>> =
       timeoutMs: { kind: 'integer', min: 100, max: 120_000 },
     },
     database: {
+      provider: { kind: 'string', max: 16, values: ['sqlite'] },
+      location: { kind: 'string', max: 16, values: ['local'] },
+      filePath: {
+        kind: 'string',
+        max: LOCAL_DATABASE_PATH_MAX_LENGTH,
+        allowEmpty: true,
+      },
+      maxRows: { kind: 'integer', min: 1, max: LOCAL_DATABASE_MAX_ROWS },
       operation: {
         kind: 'string',
         max: 16,
-        values: ['select', 'insert', 'update', 'delete'],
+        values: ['select'],
       },
     },
     transform: {
@@ -656,10 +675,13 @@ export function buildWorkflowAgentMessages(input: {
     '现有节点的 config 和 position 如果不需要修改，请省略这两个字段。',
     '不要在 config 里写 legacyStepId / legacyStepKind 这类 Studio 内部标记：它们不在允许配置目录里，服务端会自己保留现有值。',
     '必须恰好有一个 trigger；每个 required 端口都必须连接；每个节点都必须从 Trigger 可达；每个 aiAgent 必须连接一个 llmModel；condition 的 true/false 必须都连接；主执行链不得成环。',
-    '如果用户要求可编译/可导入 n8n，新节点只能使用 trigger、condition、aiAgent、llmModel、memory、tool、httpRequest、robotAction、output。只有用户明确要不可部署的概念草稿时，才能使用 database/transform。',
+    '如果用户要求可编译/可导入 n8n，新节点只能使用 trigger、condition、aiAgent、llmModel、memory、tool、httpRequest、robotAction、output。transform 只适用于不可部署的概念草稿。',
+    '用户要求连接自己电脑中的数据库时，使用 database.config={provider:"sqlite",location:"local",filePath:"用户提供的绝对文件位置",operation:"select",maxRows:100}。用户没有提供文件位置时保留空 filePath，不得虚构路径。数据库只读，支持 .db/.sqlite/.sqlite3。',
+    '本机 SQLite 是可发布的浏览器工作流，不导入 n8n。图只使用 trigger、aiAgent、llmModel、memory、database、output；恰好一个 trigger→aiAgent→output 主链，database 用 aiAgent.resource.tools→database.tool.provider 挂载；memory 可选。线上网页通过用户电脑的数据库连接助手查询文件，不能读取服务器同名文件。',
     'Adapter 会在 Trigger 后展平 Webhook body，业务节点可直接读取 $json.requestId、$json.sessionId、$json.message、$json.question、$json.channel 和 $json.urgency。',
     'memory.config.sessionKey 只写安全字段路径（通常是 sessionId），不要写 n8n 表达式或节点名。',
     'aiAgent.config.fallbackPolicy 默认选 error；除非图里确实实现了规则备援链路，不要选 rules。',
+    '用户要求限制 Agent 的行为、权限或回答范围时，写入对应 aiAgent.config.constraints，使用自然语言，最多 4000 字符；instructions 描述任务职责。保留用户未要求更改的现有限制，只有用户明确要求移除限制时才将 constraints 设为空字符串。',
     '输出结构：{"schemaVersion":1,"summary":"一句话说明变更","name":"2-80 字符","description":"0-500 字符","nodes":[{"key":"稳定标识","type":"节点类型","name":"节点名","description":"节点用途","config":{},"position":{"x":0,"y":0},"disabled":false}],"connections":[{"sourceKey":"...","sourcePort":"...","targetKey":"...","targetPort":"..."}]}',
     `端口与允许配置目录：${JSON.stringify(portCatalog)}`,
   ].join('\n');
@@ -797,6 +819,14 @@ export function createWorkflowAgentProposal(
     throw new WorkflowAgentProposalError(
       'Agent 提案不符合 Graph v1 载荷格式。',
     );
+  }
+  if (hasLocalDatabaseNodes(graph)) {
+    graph.runtime = {
+      engine: 'local-sqlite',
+      adapter: 'local-sqlite',
+      executionMode: 'browser',
+      binding: 'draft',
+    };
   }
   const issues = [
     ...validateGraph(graph),
