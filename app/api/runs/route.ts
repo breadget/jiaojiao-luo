@@ -1,4 +1,5 @@
 import { callN8nWorkflow } from '@/lib/server/n8n';
+import { isLlmReasoningEffort } from '@/lib/llm/providers';
 import {
   buildRequest,
   DEFAULT_LLM_BASE_URL,
@@ -67,6 +68,9 @@ function readLlmConfig(body: Record<string, unknown>): UrtorisLlmConfig | null {
       typeof record.model === 'string' && record.model.trim()
         ? record.model.trim()
         : DEFAULT_LLM_MODEL,
+    reasoningEffort: isLlmReasoningEffort(record.reasoningEffort)
+      ? record.reasoningEffort
+      : 'auto',
   };
 }
 

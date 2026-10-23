@@ -84,7 +84,7 @@ describe('Graph → n8n Adapter v1', () => {
     const boundaryCount = graph.nodes.filter(
       (node) => node.type === 'trigger' || node.type === 'output',
     ).length;
-    assert.equal(workflow.nodes.length, graph.nodes.length + boundaryCount);
+    assert.equal(workflow.nodes.length, graph.nodes.length + boundaryCount + 2);
     assert.equal(result.bindings.length, workflow.nodes.length);
     assert.equal(
       new Set(result.bindings.map((binding) => binding.internalNodeId)).size,
@@ -254,7 +254,7 @@ describe('Graph → n8n Adapter v1', () => {
     assert.deepEqual(trigger[0], [
       { node: 'U::node_trigger::input', type: 'main', index: 0 },
     ]);
-    assert.deepEqual(outputs(workflow, 'U::node_trigger::input', 'main')[0], [
+    assert.deepEqual(outputs(workflow, 'U::node_trigger::binding-guard', 'main')[0], [
       { node: 'U::node_route::primary', type: 'main', index: 0 },
     ]);
     const agent = outputs(workflow, 'U::node_agent::primary', 'main');
@@ -281,6 +281,7 @@ describe('Graph → n8n Adapter v1', () => {
     assert.deepEqual(result.requiredCredentialRefs, [
       'headerAuth',
       'openAiApi',
+      'urtorisEventsHeaderAuth',
     ]);
   });
 
@@ -401,7 +402,7 @@ describe('Graph → n8n Adapter v1', () => {
     const workflow = workflowOf(await compile());
     const meta = workflow.meta.urtoris as Record<string, unknown>;
     assert.equal(meta.adapter, 'n8n-v1');
-    assert.equal(meta.adapterVersion, '1.1.0');
+    assert.equal(meta.adapterVersion, '1.2.0');
     assert.equal(meta.workflowId, 'wf_canary');
     assert.equal(meta.version, 1);
     assert.match(String(meta.graphHash), /^[0-9a-f]{64}$/);
@@ -485,6 +486,7 @@ describe('Graph → n8n Adapter v1', () => {
     const result = runGeneratedCode(jsCode, {
       $input: { first: () => ({ json: { output: '{"answer":"ok"}' } }) },
       $: (name: string) => {
+        if (name === 'U::node_agent::primary') return { isExecuted: true };
         assert.equal(name, 'U::node_trigger::input');
         return { first: () => ({ json: root }) };
       },

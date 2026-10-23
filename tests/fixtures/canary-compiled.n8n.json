@@ -13,6 +13,7 @@
       "name": "U::node_trigger::primary",
       "type": "n8n-nodes-base.webhook",
       "typeVersion": 2,
+      "webhookId": "950ff7e6-1da4-10e5-a50e-8d31f7e86ba8",
       "position": [
         0,
         120
@@ -23,7 +24,7 @@
       "parameters": {
         "mode": "runOnceForAllItems",
         "language": "javaScript",
-        "jsCode": "// Urtoris Adapter v1.1 输入归一：Webhook body 展平后才进入业务节点。\nconst item = $input.first().json || {};\nconst body = item.body && typeof item.body === 'object' && !Array.isArray(item.body) ? item.body : item;\nconst headers = item.headers && typeof item.headers === 'object' ? item.headers : {};\nconst context = body.context && typeof body.context === 'object' && !Array.isArray(body.context) ? body.context : {};\nconst requestId = typeof body.requestId === 'string' && body.requestId ? body.requestId : (headers['x-urtoris-request-id'] || null);\nconst sessionId = typeof body.sessionId === 'string' && body.sessionId ? body.sessionId : (headers['x-urtoris-session-id'] || null);\nconst question = body.question !== undefined ? body.question : (body.message !== undefined ? body.message : '');\nreturn [{ json: Object.assign({}, body, {\n  workflowId: typeof body.workflowId === 'string' && body.workflowId ? body.workflowId : \"wf_canary\",\n  requestId, sessionId, question,\n  channel: body.channel !== undefined ? body.channel : (context.channel ?? null),\n  urgency: body.urgency !== undefined ? body.urgency : (context.urgency ?? null),\n  __urtorisStartedAt: Date.now(),\n  __urtorisExecutionId: $execution && $execution.id != null ? String($execution.id) : null\n}) }];"
+        "jsCode": "// Urtoris Adapter v1.1 输入归一：Webhook body 展平后才进入业务节点。\nconst item = $input.first().json || {};\nconst body = item.body && typeof item.body === 'object' && !Array.isArray(item.body) ? item.body : item;\nconst headers = item.headers && typeof item.headers === 'object' ? item.headers : {};\nconst context = body.context && typeof body.context === 'object' && !Array.isArray(body.context) ? body.context : {};\nconst input = context.input && typeof context.input === 'object' && !Array.isArray(context.input) ? context.input : {};\nconst requestId = typeof body.requestId === 'string' && body.requestId ? body.requestId : (headers['x-urtoris-request-id'] || null);\nconst sessionId = typeof body.sessionId === 'string' && body.sessionId ? body.sessionId : (headers['x-urtoris-session-id'] || null);\nconst question = body.question !== undefined ? body.question : (body.message !== undefined ? body.message : '');\nif (typeof requestId !== \"string\" || !requestId.trim() || requestId.length > 80 || requestId.trim().toLowerCase() === \"unknown\") throw new Error(\"VALIDATION_ERROR: requestId required\");\nif (typeof sessionId !== \"string\" || !sessionId.trim() || sessionId.length > 80) throw new Error(\"VALIDATION_ERROR: sessionId required\");\nif (body.workflowId && body.workflowId !== \"wf_canary\") throw new Error(\"VALIDATION_ERROR: workflowId mismatch\");\nreturn [{ json: Object.assign({}, body, {\n  workflowId: \"wf_canary\",\n  requestId: requestId.trim(), sessionId: sessionId.trim(), question,\n  channel: body.channel !== undefined ? body.channel : (context.channel ?? input.channel ?? null),\n  urgency: body.urgency !== undefined ? body.urgency : (context.urgency ?? input.urgency ?? null),\n  __urtorisStartedAt: Date.now(),\n  __urtorisExecutionId: $execution && $execution.id != null ? String($execution.id) : null\n}) }];"
       },
       "id": "4be96301-5ad5-64f7-e2d7-10eae49631f0",
       "name": "U::node_trigger::input",
@@ -34,6 +35,59 @@
         270
       ],
       "notes": "接收请求 · 展平 Webhook body，建立稳定的输入字段。"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://127.0.0.1:3000/api/n8n/events",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ source: \"n8n-execution-data-v1\", sourceSeq: 0, eventType: \"execution.bound\", workflowId: \"wf_canary\", graphVersion: 1, requestId: $json.requestId, sessionId: $json.sessionId, executionId: String($execution.id), triggerNodeId: \"U::node_trigger::primary\" }) }}",
+        "options": {
+          "timeout": 10000,
+          "redirect": {
+            "redirect": {
+              "followRedirects": false
+            }
+          },
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "neverError": true,
+              "responseFormat": "json"
+            }
+          }
+        }
+      },
+      "id": "1c6a48f6-ebe6-f116-163c-fa0dd39744a9",
+      "name": "U::node_trigger::execution-bound",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        440,
+        270
+      ],
+      "notes": "credentialRef: urtorisEventsHeaderAuth; clone only; synchronous execution.bound barrier.",
+      "onError": "stopWorkflow"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "const response = $input.first().json;\nif (response.statusCode !== 200 || response.body?.ok !== true || response.body?.bound !== true) {\n  throw new Error(\"BINDING_FAILED: execution.bound was not acknowledged\");\n}\nreturn [{ json: $(\"U::node_trigger::input\").first().json }];"
+      },
+      "id": "637c763c-22fd-b7f4-247f-a880e60a287d",
+      "name": "U::node_trigger::binding-guard",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        660,
+        270
+      ],
+      "notes": "Only HTTP 200 and ok=true, bound=true permit business execution.",
+      "onError": "stopWorkflow"
     },
     {
       "parameters": {
@@ -201,7 +255,7 @@
       "parameters": {
         "mode": "runOnceForAllItems",
         "language": "javaScript",
-        "jsCode": "// Urtoris Adapter v1.1 输出归一：所有分支都返回 urtoris.v1 信封。\nconst source = $input.first().json || {};\nconst root = $('U::node_trigger::input').first().json || {};\nlet data = source;\nif (typeof source.output === 'string') {\n  try { data = JSON.parse(source.output); }\n  catch (error) { data = { message: source.output }; }\n}\nif (!data || typeof data !== 'object' || Array.isArray(data)) data = { message: String(data ?? '') };\nconst finishedAt = Date.now();\nconst startedAt = typeof root.__urtorisStartedAt === 'number' ? root.__urtorisStartedAt : finishedAt;\nreturn [{ json: {\n  protocol: 'urtoris.v1', success: true,\n  requestId: typeof root.requestId === 'string' && root.requestId ? root.requestId : 'unknown',\n  engine: 'n8n',\n  workflow: \"wf_canary\",\n  mode: \"llm\", degraded: false,\n  data: Object.assign({}, data, {\n    outputNodeId: \"node_out\",\n    outputNodeName: \"返回结果\"\n  }),\n  error: null,\n  meta: {\n    executionId: root.__urtorisExecutionId || null,\n    sessionId: root.sessionId || null,\n    durationMs: Math.max(0, finishedAt - startedAt),\n    attempt: root.meta && Number.isInteger(root.meta.attempt) ? root.meta.attempt : 1,\n    startedAt, finishedAt\n  }\n} }];"
+        "jsCode": "// Urtoris Adapter v1.1 输出归一：所有分支都返回 urtoris.v1 信封。\nconst source = $input.first().json || {};\nconst llmExecuted = [\"U::node_agent::primary\"].some(name => $(name).isExecuted);\nconst rulesDegraded = [].some(name => $(name).isExecuted);\nconst root = $('U::node_trigger::input').first().json || {};\nlet data = source;\nif (typeof source.output === 'string') {\n  try { data = JSON.parse(source.output); }\n  catch (error) { data = { message: source.output }; }\n}\nif (!data || typeof data !== 'object' || Array.isArray(data)) data = { message: String(data ?? '') };\nconst finishedAt = Date.now();\nconst startedAt = typeof root.__urtorisStartedAt === 'number' ? root.__urtorisStartedAt : finishedAt;\nreturn [{ json: {\n  protocol: 'urtoris.v1', success: true,\n  requestId: typeof root.requestId === 'string' && root.requestId ? root.requestId : 'unknown',\n  engine: 'n8n',\n  workflow: \"wf_canary\",\n  mode: llmExecuted ? 'llm' : 'rules', degraded: rulesDegraded,\n  data: Object.assign({}, data, {\n    outputNodeId: \"node_out\",\n    outputNodeName: \"返回结果\"\n  }),\n  error: null,\n  meta: {\n    executionId: root.__urtorisExecutionId || null,\n    sessionId: root.sessionId || null,\n    durationMs: Math.max(0, finishedAt - startedAt),\n    attempt: root.meta && Number.isInteger(root.meta.attempt) ? root.meta.attempt : 1,\n    startedAt, finishedAt\n  }\n} }];"
       },
       "id": "87f23c22-26a4-4b9a-1f5e-e3b2e0d1194e",
       "name": "U::node_out::envelope",
@@ -227,6 +281,28 @@
       ]
     },
     "U::node_trigger::input": {
+      "main": [
+        [
+          {
+            "node": "U::node_trigger::execution-bound",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "U::node_trigger::execution-bound": {
+      "main": [
+        [
+          {
+            "node": "U::node_trigger::binding-guard",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "U::node_trigger::binding-guard": {
       "main": [
         [
           {
@@ -334,17 +410,22 @@
     }
   },
   "settings": {
-    "executionOrder": "v1"
+    "executionOrder": "v1",
+    "saveDataSuccessExecution": "all",
+    "saveDataErrorExecution": "all"
   },
   "active": false,
   "meta": {
     "urtoris": {
       "adapter": "n8n-v1",
-      "adapterVersion": "1.1.0",
+      "adapterVersion": "1.2.0",
       "workflowId": "wf_canary",
       "version": 1,
       "graphHash": "0819ac92501db7b8a9d13dc71e3e49aa1fc24b8816e0f2e3d69d628a2dfd1145",
-      "webhookPath": "urtoris/wf_canary"
+      "webhookPath": "urtoris/wf_canary",
+      "eventSource": "n8n-execution-data-v1",
+      "runtimeCanaryOnly": true,
+      "noModelRoutes": []
     }
   }
 }

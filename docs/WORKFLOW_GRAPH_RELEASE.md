@@ -1,7 +1,29 @@
 # Workflow Studio：Graph 发布闭环（P0 实现说明）
 
-更新时间：2026-09-12
-适用范围：`lib/workflow-graph/*`、`lib/server/workflow-version-store.ts`、`app/api/workflows/[id]/graph/*`、`drizzle/0007`、`drizzle/0008`
+更新时间：2026-09-13
+适用范围：`lib/workflow-graph/*`、`lib/server/workflow-version-store.ts`、`lib/server/graph-runtime-events.ts`、Graph/事件/telemetry API、`drizzle/0007`–`0009`
+
+## 本轮增量：Adapter 1.2.0 真实事件来源
+
+采用 [ADR 001](ADR-001-GRAPH-RUNTIME-EVENTS.md) 的克隆 execution-data forwarder，
+入口确定性生成 execution.bound HTTP 节点和严格守卫，200 + ok/bound 布尔 true 才进入危险节点。
+Webhook body 展平、请求/session 校验、确定性 webhookId、原生 Qwen/Memory/Condition
+及两分支 envelope 已在真实 n8n 2.38.6 验证；模型服务为本地替身。
+
+节点 started/finished/error 来自 n8n 持久化 runData，送达发生在执行定稿之后。
+Condition skipped 来自真实空输出口，未映射节点进入 unmappedNodes；无执行数据保持 pending。
+`execution.bound` 固定 graphVersion，`sourceSeq` + 事务收据保证幂等/顺序；telemetry 的
+`afterSeq` 是独立的 D1 游标，按当前 run.executionId 隔离重试执行，返回 boundVersion 和 eventsComplete。
+新 `0009` 必须先应用；`URTORIS_GRAPH_RUNTIME_CANARY` 默认关闭（503），只在被忽略的本机
+配置中设为 1。既有 Graph/WorkflowStep 原子双写范围不变。
+
+显式无 Key 用 `llmModel.config.credentialRef=none` 和 `aiAgent.config.fallbackPolicy=rules`，
+返回 rules/degraded=true；已声明凭据的鉴权/网络/格式错误一律失败，不触发规则成功。
+原生 Simple Memory 仅保证单进程会话复用，本次未把它宣传成持久或跨 worker 存储。
+
+复现、11 个 workflow 顺序、凭据挂载、观察与回滚命令见 [Canary Runbook](CANARY_RUNBOOK.md)。
+测试/产物 hash/实际执行 ID/残余边界见 [本轮证据](evidence/graph-runtime-canary.json)。
+**Deploy 继续 Adapter locked，生产 n8n 与数据库均未访问。** 下文历史发布接口和原子性约束继续有效。
 
 ---
 

@@ -1,4 +1,5 @@
 import { env } from 'cloudflare:workers';
+import { isLlmReasoningEffort } from '@/lib/llm/providers';
 
 import { callN8nWorkflow } from '@/lib/server/n8n';
 import {
@@ -50,6 +51,9 @@ function readLlmConfig(body: Record<string, unknown>): UrtorisLlmConfig | null {
       typeof record.model === 'string' && record.model.trim()
         ? record.model.trim()
         : DEFAULT_LLM_MODEL,
+    reasoningEffort: isLlmReasoningEffort(record.reasoningEffort)
+      ? record.reasoningEffort
+      : 'auto',
   };
 }
 

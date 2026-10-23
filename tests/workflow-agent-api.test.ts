@@ -253,6 +253,7 @@ describe('POST /api/workflows/agent', () => {
     assert.deepEqual(body.proposal.compile.requiredCredentialRefs, [
       'headerAuth',
       'openAiApi',
+      'urtorisEventsHeaderAuth',
     ]);
     assert.equal(body.persisted, false);
     assert.equal(body.imported, false);

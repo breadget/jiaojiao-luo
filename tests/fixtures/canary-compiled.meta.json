@@ -1,6 +1,6 @@
 {
   "graphHash": "0819ac92501db7b8a9d13dc71e3e49aa1fc24b8816e0f2e3d69d628a2dfd1145",
-  "compiledHash": "3f711e2b4468260797e63b15c0135c0cf39bb73867f54b600c680deb449e7229",
+  "compiledHash": "c31e2c9f82cd4eabd10843def790693cdd18d035d989ebb784bdacb3bec496a6",
   "bindings": [
     {
       "internalNodeId": "node_trigger",
@@ -13,6 +13,18 @@
       "externalNodeId": "4be96301-5ad5-64f7-e2d7-10eae49631f0",
       "externalNodeName": "U::node_trigger::input",
       "role": "input"
+    },
+    {
+      "internalNodeId": "node_trigger",
+      "externalNodeId": "1c6a48f6-ebe6-f116-163c-fa0dd39744a9",
+      "externalNodeName": "U::node_trigger::execution-bound",
+      "role": "execution-bound"
+    },
+    {
+      "internalNodeId": "node_trigger",
+      "externalNodeId": "637c763c-22fd-b7f4-247f-a880e60a287d",
+      "externalNodeName": "U::node_trigger::binding-guard",
+      "role": "binding-guard"
     },
     {
       "internalNodeId": "node_route",
@@ -71,6 +83,7 @@
   ],
   "requiredCredentialRefs": [
     "headerAuth",
-    "openAiApi"
+    "openAiApi",
+    "urtorisEventsHeaderAuth"
   ]
 }

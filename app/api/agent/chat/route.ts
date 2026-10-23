@@ -3,6 +3,7 @@ import {
   buildAgentReply,
   type AgentAnalysis,
 } from '@/lib/server/agent-brain';
+import { isLlmReasoningEffort } from '@/lib/llm/providers';
 import {
   buildWorkflowSystemPrompt,
   callChatModel,
@@ -158,6 +159,18 @@ export async function POST(request: Request) {
   const provider = readOptionalString(body.provider, 40);
   const requestedBaseUrl = readOptionalString(body.baseUrl, 400);
   const requestedModel = readOptionalString(body.model, 120);
+  const reasoningEffort =
+    body.reasoningEffort === undefined
+      ? 'auto'
+      : isLlmReasoningEffort(body.reasoningEffort)
+        ? body.reasoningEffort
+        : null;
+  if (!reasoningEffort) {
+    return Response.json(
+      { error: '推理强度只能是 auto、low、medium 或 high。' },
+      { status: 400 },
+    );
+  }
   const selection = resolveLlmSelection({
     provider,
     baseUrl: requestedBaseUrl,
@@ -222,7 +235,7 @@ export async function POST(request: Request) {
       requestId: incomingRequestId ?? null,
       sessionId: incomingSessionId ?? null,
       userId: readOptionalString(body.userId, 80) ?? null,
-      llm: apiKey ? { apiKey, baseUrl, model } : null,
+      llm: apiKey ? { apiKey, baseUrl, model, reasoningEffort } : null,
       context: { intentHint: analysis.intent },
       source: 'urtoris-web',
       workflowVersion: workflow.version,
@@ -365,6 +378,7 @@ export async function POST(request: Request) {
         provider: selection.selection.providerId,
         baseUrl,
         model,
+        reasoningEffort,
         messages: history,
       });
 

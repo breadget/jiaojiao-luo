@@ -10,11 +10,23 @@ n8n 必须配置 `N8N_EDITOR_BASE_URL` 和 `WEBHOOK_URL` 为正式 HTTPS 子域�
 
 ## 发布顺序
 
-1. 备份站点源码、D1 持久化目录、n8n 数据目录、Nginx 和 systemd 配置。
-2. 先在本地跑站点构建和协议校验。
-3. 在 ECS 上用 `deploy/rebuild-safe.sh` 构建；低内存机器构建期间会暂停 n8n。
-4. 应用 D1 迁移后重启站点，再恢复 n8n。
-5. 验证五个绑定、两个并发请求的 requestId/executionId、规则降级语义和错误归一。
+正式发布走 GitHub Actions（[`deploy-urtoris.yml`](../.github/workflows/deploy-urtoris.yml)），
+推送到 `codex/graph-runtime-canary` 即触发：
+
+1. 验证 job：`npm ci` → `npm test -- --test-concurrency=1` → `tsc --noEmit` →
+   `oxlint` → 构建。任何一步失败都不会进入部署。
+2. 部署 job：把该提交打成只含 `refs/heads/ci-deploy` 的 Git bundle，经受限 SSH
+   入口（`urtoris-deploy@43.132.210.43`）送进服务器上的
+   [`deploy/github-actions/urtoris-deploy`](../deploy/github-actions/urtoris-deploy)。
+3. 服务器端**要求快进**（`merge-base --is-ancestor`）。它在临时 worktree 里
+   `npm ci` + 构建，用新版 Wrangler 应用 D1 迁移，替换 `dist` / `node_modules`
+   并重启 `urtoris`；健康检查失败会自动换回上一份运行时。
+4. 最后验证 `https://urtoris.cn/studio` 返回 200。
+
+所以发版前的顺序是：先把 `codex/graph-runtime-canary` 合并进特性分支（保住快进），
+本地跑一遍 `npm test`、`npx tsc --noEmit`、`npx oxlint`、`npm run build`，再推送。
+`deploy/rebuild-safe.sh` 只作为手工兜底，正常发版不再使用；低内存重建期间的 n8n
+暂停也随之不再需要。
 
 `/healthz` 返回 200 只代表 n8n 已监听端口，不代表 active workflows 已全部注册。重启后的自动测试必须等到 `/healthz/readiness` 通过，并且对 W1 Webhook 的无凭据探测返回 401/403（而不是未注册时的 404）后再开始。
 
@@ -81,6 +93,25 @@ N8N_DIAGNOSTICS_ENABLED=false
 Code 与 HTTP Request 是比赛工作流的必要能力，`n8n audit` 会按节点类型列为风险；处理方式是逐个审查输入、目标 URL、鉴权和超时，而不是全局禁用。
 
 ## 网站 API 边界
+
+### 本机全权限通道在生产必须保持关闭
+
+`/api/local-control/*` 只有在显式配置 `LOCAL_CONTROL_ENABLED` **并且**请求来自本机
+（loopback / 私网、未经代理、非跨站）时才工作。生产 `.dev.vars` 不配置这三个
+`LOCAL_CONTROL_*` 变量，服务器上也没有跑 Control Agent。
+
+线上实测（2026-09-15 发布 `30b4f08` 之后）：
+
+| 请求 | 结果 |
+| --- | --- |
+| `GET https://urtoris.cn/api/local-control/status` | 404 `{"code":"NOT_FOUND"}` |
+| `POST https://urtoris.cn/api/local-control/agent` | 404 `{"code":"NOT_FOUND"}` |
+| `GET https://urtoris.cn/api/local-control/nope`（对照） | HTML 404 页面 |
+
+前两条返回的是站点自己的 JSON 信封，说明路由确实存在、判定为非本机后按不存在处理；
+前端拿到 404 会把「本机全权限」整块隐藏。永远不要把 3020 端口、Control Agent 或
+机器人桥接服务暴露到公网，远程控制需要新的威胁模型（见
+[`ADR-003-local-full-control.md`](ADR-003-local-full-control.md)）。
 
 公网 `GET /api/state` 当前用于工作台加载数据，返回专用的公开 DTO：不包含 n8n 鉴权头；运行记录去除消息原文、内部日志、session/request/execution 关联标识等非展示必需字段。为支持工作台配置和编辑，工作流 DTO 仍会返回已保存的 `n8nWebhookUrl`；该 URL 不包含鉴权令牌，并且服务端在保存和执行前都会再次校验其是否属于 `N8N_BASE_URL` origin 下的 `/webhook/urtoris/*` 白名单。若后续不再需要浏览器编辑，可进一步改为仅返回脱敏的 origin/路径状态。
 

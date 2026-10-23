@@ -1,0 +1,37 @@
+{
+  "capturedAt": "2026-09-15T10:14:50+09:00",
+  "environment": {
+    "site": "http://[::1]:3000",
+    "browser": "Codex In-app Browser",
+    "mode": "模拟模式"
+  },
+  "checks": [
+    {
+      "name": "会话接口与 D1 迁移",
+      "result": "passed",
+      "details": "使用端打开后无会话错误提示，GET /api/consumer/session 返回 200 并设置 HttpOnly consumer cookie。"
+    },
+    {
+      "name": "刷新后消息恢复",
+      "result": "passed",
+      "message": "本机持久化验收：请保留这条消息",
+      "details": "模拟回合完成后刷新并重新进入使用端，用户消息、Agent 回复与运行记录仍可见。"
+    },
+    {
+      "name": "手机宽度",
+      "result": "passed",
+      "viewport": { "width": 390, "height": 844 },
+      "scrollWidth": 390
+    },
+    {
+      "name": "1024 宽度",
+      "result": "passed",
+      "viewport": { "width": 1024, "height": 768 },
+      "scrollWidth": 1024
+    }
+  ],
+  "caveats": [
+    "本次浏览器回合使用模拟 Agent，不代替真实模型 Key 的生产验收。",
+    "合盖/休眠和断网的物理中断未人为触发；预期 WORKER_ERROR 语义记录在 python-executor-long-run.json。"
+  ]
+}

@@ -1,0 +1,756 @@
+{
+  "scope": "Real n8n 2.38.6 + isolated local SQLite/workerd D1 + local OpenAI-compatible substitute + real Studio browser",
+  "complete": true,
+  "baseline": "0f14948b0e6cf74aa85edc514e6bed76a1b8d005",
+  "branch": "codex/graph-runtime-canary",
+  "generatedAt": "2026-09-12T22:56:34.839Z",
+  "architecture": "B: saved execution-data forwarder with synchronous deterministic prebind gate",
+  "runtime": {
+    "node": "v24.19.0",
+    "packages": [
+      {
+        "name": "n8n",
+        "version": "2.38.6",
+        "packageJsonSha256": "ecdec159ff81f49c808502cbb01234470b88479d528e0d6e7c5f10aa7a0da080"
+      },
+      {
+        "name": "n8n-core",
+        "version": "2.38.2",
+        "packageJsonSha256": "174c1076ed8cf87427d0e9cf286ce2f6bc2e52ce13ace58ae5808481c388c816"
+      },
+      {
+        "name": "n8n-nodes-base",
+        "version": "2.38.2",
+        "packageJsonSha256": "1dbe3306c54a2bfead7ed6585f57226973b05b6b618e60c79ade48e01b17fa9e"
+      },
+      {
+        "name": "@n8n/n8n-nodes-langchain",
+        "version": "2.38.2",
+        "packageJsonSha256": "0926d16021c0dcf48c4e4d7d87c97f3ce64de1ea2f39f5e9cb80118231b8d331"
+      }
+    ],
+    "sources": [
+      {
+        "path": "dist/execution-lifecycle/execution-lifecycle-hooks.js",
+        "sha256": "42fbd4ee113cd2a1e493d05306299be5ec9124bf9370a306953e60c3183fd078"
+      },
+      {
+        "path": "dist/execution-engine/node-execution-context/supply-data-context.js",
+        "sha256": "5c395a5990f2229b0bf658ab7eeddf6f7225ed3ce29153256b252be57b60f720"
+      },
+      {
+        "path": "dist/nodes/memory/MemoryBufferWindow/MemoryBufferWindow.node.js",
+        "sha256": "472d36b229eab49f07108c2a9fbda0ce94b6bc94a9b11ab3900ac6b419c33dcb"
+      },
+      {
+        "path": "dist/nodes/Webhook/Webhook.node.js",
+        "sha256": "848cb027dd32ca69bb22466721bd9223b002a8480bd28352d1c9a402f0f8fe73"
+      }
+    ]
+  },
+  "artifacts": {
+    "goldenCompiledHash": "c31e2c9f82cd4eabd10843def790693cdd18d035d989ebb784bdacb3bec496a6",
+    "goldenGraphHash": "0819ac92501db7b8a9d13dc71e3e49aa1fc24b8816e0f2e3d69d628a2dfd1145",
+    "goldenFileSha256": "c4b05f8bb1e34e74a093fb65f1b4dab0c8faf62d43ecebb8ee0fd4a61fe7afb6",
+    "graphCompiledHash": "fdf5c7ca21faa6005ad3f88b7ddb477f5c11e56f09fe6d63eb2589c9810b8c87",
+    "graphVersion": 3,
+    "noKeyCompiledHash": "8e11bf0ada5f4d8a30d7d10c40915fba936be34c6a57b0369e6f0f5b1aa553bc",
+    "importCopySha256": "06483b1497ba2342fb4aa99a73954b3500e8be63a1af4576cc3636ff831bedac",
+    "noCredentials": true,
+    "deterministic": true
+  },
+  "family": {
+    "count": 11,
+    "active": [
+      {
+        "id": "urtoris-common-auth",
+        "activeVersionId": "ded9f26e-056a-4413-a2b4-067b6872c7c4"
+      },
+      {
+        "id": "urtoris-common-llm",
+        "activeVersionId": "209d1fdc-2288-4c32-8253-54acb981896f"
+      },
+      {
+        "id": "urtoris-common-envelope",
+        "activeVersionId": "aec8ffd5-9cc7-4e52-b1c7-982167a46b82"
+      },
+      {
+        "id": "urtoris-common-log",
+        "activeVersionId": "1ad49755-868c-4e36-bcca-fd5ca6039890"
+      },
+      {
+        "id": "urtoris-global-error-handler",
+        "activeVersionId": "7665c03b-9648-4218-bf97-e61ded68c3c5"
+      },
+      {
+        "id": "urtoris-wf-llm-smoke",
+        "activeVersionId": "4135fc81-6bb6-4a29-b985-94fbcf9ec398"
+      },
+      {
+        "id": "urtoris-wf-user-manager",
+        "activeVersionId": "1136fc85-e3c6-41a8-b71e-4ef92db8b311"
+      },
+      {
+        "id": "urtoris-wf-security-analysis",
+        "activeVersionId": "5a0c869b-729f-4c48-bdf1-3175a11647db"
+      },
+      {
+        "id": "urtoris-wf-api-gateway",
+        "activeVersionId": "5f8232b4-6ee0-4077-832f-6ab2a59368aa"
+      },
+      {
+        "id": "urtoris-wf-customer-insights",
+        "activeVersionId": "d246fbeb-d89a-4ff3-aac1-04aeb465de65"
+      },
+      {
+        "id": "urtoris-gateway",
+        "activeVersionId": "8bc42667-1503-4d40-954f-54a035df7375"
+      }
+    ],
+    "importedCopySha256": "aca1dd2bf41bc113a9e77d9f59fbed90a55df27a584469dce028ce5ceaa0fc4e",
+    "scope": "Import and activation verified; Graph matrix does not certify all legacy business workflows."
+  },
+  "matrix": {
+    "scope": "six-case-matrix",
+    "matrixPassed": true,
+    "memoryIsolation": true,
+    "cases": [
+      {
+        "name": "high",
+        "requestId": "fecbcc1e-155e-4d23-8186-c8c0a5ea0605-high",
+        "executionId": "32",
+        "status": "completed",
+        "events": 15,
+        "nodes": [
+          {
+            "nodeId": "node_trigger",
+            "state": "success"
+          },
+          {
+            "nodeId": "node_route",
+            "state": "success"
+          },
+          {
+            "nodeId": "node_agent",
+            "state": "success"
+          },
+          {
+            "nodeId": "node_model",
+            "state": "success"
+          },
+          {
+            "nodeId": "node_memory",
+            "state": "success"
+          },
+          {
+            "nodeId": "node_high",
+            "state": "success"
+          },
+          {
+            "nodeId": "node_normal",
+            "state": "skipped"
+          }
+        ]
+      },
+      {
+        "name": "memory-same",
+        "requestId": "fecbcc1e-155e-4d23-8186-c8c0a5ea0605-memory-same",
+        "executionId": "33",
+        "status": "completed",
+        "events": 15,
+        "nodes": [
+          {
+            "nodeId": "node_trigger",
+            "state": "success"
+          },
+          {
+            "nodeId": "node_route",
+            "state": "success"
+          },
+          {
+            "nodeId": "node_agent",
+            "state": "success"
+          },
+          {
+            "nodeId": "node_model",
+            "state": "success"
+          },
+          {
+            "nodeId": "node_memory",
+            "state": "success"
+          },
+          {
+            "nodeId": "node_high",
+            "state": "skipped"
+          },
+          {
+            "nodeId": "node_normal",
+            "state": "success"
+          }
+        ]
+      },
+      {
+        "name": "memory-other",
+        "requestId": "fecbcc1e-155e-4d23-8186-c8c0a5ea0605-memory-other",
+        "executionId": "34",
+        "status": "completed",
+        "events": 15,
+        "nodes": [
+          {
+            "nodeId": "node_trigger",
+            "state": "success"
+          },
+          {
+            "nodeId": "node_route",
+            "state": "success"
+          },
+          {
+            "nodeId": "node_agent",
+            "state": "success"
+          },
+          {
+            "nodeId": "node_model",
+            "state": "success"
+          },
+          {
+            "nodeId": "node_memory",
+            "state": "success"
+          },
+          {
+            "nodeId": "node_high",
+            "state": "skipped"
+          },
+          {
+            "nodeId": "node_normal",
+            "state": "success"
+          }
+        ]
+      },
+      {
+        "name": "wrong-key",
+        "requestId": "fecbcc1e-155e-4d23-8186-c8c0a5ea0605-wrong-key",
+        "executionId": "36",
+        "status": "failed",
+        "events": 11,
+        "nodes": [
+          {
+            "nodeId": "node_trigger",
+            "state": "success"
+          },
+          {
+            "nodeId": "node_route",
+            "state": "waiting"
+          },
+          {
+            "nodeId": "node_agent",
+            "state": "error"
+          },
+          {
+            "nodeId": "node_model",
+            "state": "error"
+          },
+          {
+            "nodeId": "node_memory",
+            "state": "success"
+          },
+          {
+            "nodeId": "node_high",
+            "state": "waiting"
+          },
+          {
+            "nodeId": "node_normal",
+            "state": "waiting"
+          }
+        ]
+      },
+      {
+        "name": "network",
+        "requestId": "fecbcc1e-155e-4d23-8186-c8c0a5ea0605-network",
+        "executionId": "38",
+        "status": "failed",
+        "events": 11,
+        "nodes": [
+          {
+            "nodeId": "node_trigger",
+            "state": "success"
+          },
+          {
+            "nodeId": "node_route",
+            "state": "waiting"
+          },
+          {
+            "nodeId": "node_agent",
+            "state": "error"
+          },
+          {
+            "nodeId": "node_model",
+            "state": "error"
+          },
+          {
+            "nodeId": "node_memory",
+            "state": "success"
+          },
+          {
+            "nodeId": "node_high",
+            "state": "waiting"
+          },
+          {
+            "nodeId": "node_normal",
+            "state": "waiting"
+          }
+        ]
+      },
+      {
+        "name": "malformed",
+        "requestId": "fecbcc1e-155e-4d23-8186-c8c0a5ea0605-malformed",
+        "executionId": "40",
+        "status": "failed",
+        "events": 11,
+        "nodes": [
+          {
+            "nodeId": "node_trigger",
+            "state": "success"
+          },
+          {
+            "nodeId": "node_route",
+            "state": "waiting"
+          },
+          {
+            "nodeId": "node_agent",
+            "state": "error"
+          },
+          {
+            "nodeId": "node_model",
+            "state": "error"
+          },
+          {
+            "nodeId": "node_memory",
+            "state": "success"
+          },
+          {
+            "nodeId": "node_high",
+            "state": "waiting"
+          },
+          {
+            "nodeId": "node_normal",
+            "state": "waiting"
+          }
+        ]
+      }
+    ]
+  },
+  "verifiedInputs": [
+    {
+      "case": "high",
+      "executionId": "32",
+      "requestIdMatches": true,
+      "sessionKeyNonempty": true,
+      "questionPropagated": true,
+      "channel": "web",
+      "urgency": "high"
+    },
+    {
+      "case": "memory-same",
+      "executionId": "33",
+      "requestIdMatches": true,
+      "sessionKeyNonempty": true,
+      "questionPropagated": true,
+      "channel": "web",
+      "urgency": "normal"
+    },
+    {
+      "case": "memory-other",
+      "executionId": "34",
+      "requestIdMatches": true,
+      "sessionKeyNonempty": true,
+      "questionPropagated": true,
+      "channel": "web",
+      "urgency": "normal"
+    },
+    {
+      "case": "wrong-key",
+      "executionId": "36",
+      "requestIdMatches": true,
+      "sessionKeyNonempty": true,
+      "questionPropagated": true,
+      "channel": "web",
+      "urgency": "high"
+    },
+    {
+      "case": "network",
+      "executionId": "38",
+      "requestIdMatches": true,
+      "sessionKeyNonempty": true,
+      "questionPropagated": true,
+      "channel": "web",
+      "urgency": "high"
+    },
+    {
+      "case": "malformed",
+      "executionId": "40",
+      "requestIdMatches": true,
+      "sessionKeyNonempty": true,
+      "questionPropagated": true,
+      "channel": "web",
+      "urgency": "normal"
+    }
+  ],
+  "nodeErrors": [
+    {
+      "case": "wrong-key",
+      "error": {
+        "code": "LLM_ERROR",
+        "message": "n8n execution failed.",
+        "detail": "Raw upstream content and credentials withheld; inspect the isolated execution locally.",
+        "eventType": "node.error",
+        "at": 1789252006462
+      }
+    },
+    {
+      "case": "network",
+      "error": {
+        "code": "NETWORK_ERROR",
+        "message": "Model or upstream network request failed.",
+        "detail": "Raw upstream content and credentials withheld; inspect the isolated execution locally.",
+        "eventType": "node.error",
+        "at": 1789252009432
+      }
+    },
+    {
+      "case": "malformed",
+      "error": {
+        "code": "LLM_ERROR",
+        "message": "n8n execution failed.",
+        "detail": "Raw upstream content and credentials withheld; inspect the isolated execution locally.",
+        "eventType": "node.error",
+        "at": 1789252012336
+      }
+    }
+  ],
+  "proofs": {
+    "binding-fault-results": {
+      "passed": true,
+      "results": [
+        {
+          "bindingStatus": 400,
+          "executionId": "10",
+          "n8nStatus": "error",
+          "nodes": [
+            "U::node_trigger::primary",
+            "U::node_trigger::input",
+            "U::node_trigger::execution-bound",
+            "U::node_trigger::binding-guard"
+          ]
+        },
+        {
+          "bindingStatus": 401,
+          "executionId": "11",
+          "n8nStatus": "error",
+          "nodes": [
+            "U::node_trigger::primary",
+            "U::node_trigger::input",
+            "U::node_trigger::execution-bound",
+            "U::node_trigger::binding-guard"
+          ]
+        },
+        {
+          "bindingStatus": 404,
+          "executionId": "12",
+          "n8nStatus": "error",
+          "nodes": [
+            "U::node_trigger::primary",
+            "U::node_trigger::input",
+            "U::node_trigger::execution-bound",
+            "U::node_trigger::binding-guard"
+          ]
+        },
+        {
+          "bindingStatus": 409,
+          "executionId": "13",
+          "n8nStatus": "error",
+          "nodes": [
+            "U::node_trigger::primary",
+            "U::node_trigger::input",
+            "U::node_trigger::execution-bound",
+            "U::node_trigger::binding-guard"
+          ]
+        },
+        {
+          "bindingStatus": 503,
+          "executionId": "14",
+          "n8nStatus": "error",
+          "nodes": [
+            "U::node_trigger::primary",
+            "U::node_trigger::input",
+            "U::node_trigger::execution-bound",
+            "U::node_trigger::binding-guard"
+          ]
+        }
+      ]
+    },
+    "no-key-result": {
+      "passed": true,
+      "requestId": "10d9c1f1-49af-42f4-8243-63bb81e62832",
+      "executionId": "41",
+      "mode": "rules",
+      "degraded": true,
+      "modelCalls": 0,
+      "nodes": [
+        {
+          "nodeId": "node_trigger",
+          "name": "接收请求",
+          "type": "trigger",
+          "state": "success",
+          "durationMs": 1,
+          "startedAt": 1789252014818,
+          "finishedAt": 1789252014819,
+          "conflicts": 0,
+          "lastEventSeq": 442,
+          "error": null
+        },
+        {
+          "nodeId": "node_route",
+          "name": "是否高优先级",
+          "type": "condition",
+          "state": "success",
+          "durationMs": 1,
+          "startedAt": 1789252014885,
+          "finishedAt": 1789252014886,
+          "conflicts": 0,
+          "lastEventSeq": 446,
+          "error": null
+        },
+        {
+          "nodeId": "node_agent",
+          "name": "AI 主管",
+          "type": "aiAgent",
+          "state": "success",
+          "durationMs": 4,
+          "startedAt": 1789252014881,
+          "finishedAt": 1789252014885,
+          "conflicts": 0,
+          "lastEventSeq": 445,
+          "error": null
+        },
+        {
+          "nodeId": "node_model",
+          "name": "Qwen Plus",
+          "type": "llmModel",
+          "state": "skipped",
+          "durationMs": null,
+          "startedAt": null,
+          "finishedAt": 1789252014891,
+          "conflicts": 0,
+          "lastEventSeq": 450,
+          "error": null
+        },
+        {
+          "nodeId": "node_memory",
+          "name": "会话记忆",
+          "type": "memory",
+          "state": "skipped",
+          "durationMs": null,
+          "startedAt": null,
+          "finishedAt": 1789252014891,
+          "conflicts": 0,
+          "lastEventSeq": 449,
+          "error": null
+        },
+        {
+          "nodeId": "node_high",
+          "name": "High response",
+          "type": "output",
+          "state": "success",
+          "durationMs": 1,
+          "startedAt": 1789252014890,
+          "finishedAt": 1789252014891,
+          "conflicts": 0,
+          "lastEventSeq": 448,
+          "error": null
+        },
+        {
+          "nodeId": "node_normal",
+          "name": "Normal response",
+          "type": "output",
+          "state": "skipped",
+          "durationMs": null,
+          "startedAt": null,
+          "finishedAt": 1789252014891,
+          "conflicts": 0,
+          "lastEventSeq": 451,
+          "error": null
+        }
+      ]
+    },
+    "unmapped-result": {
+      "passed": true,
+      "requestId": "e6d4c501-93d0-45fd-93c5-d5da10e9e8bf",
+      "executionId": "31",
+      "unmappedNodes": [
+        "Clone extra unmapped node"
+      ]
+    },
+    "runtime-protocol-result": {
+      "passed": true,
+      "executionId": "32",
+      "statuses": {
+        "duplicateBinding": 200,
+        "unauthorized": 401,
+        "invalidRequest": 400,
+        "unknownWorkflow": 404,
+        "executionConflict": 409,
+        "workflowConflict": 409,
+        "sessionConflict": 409,
+        "versionConflict": 409,
+        "terminalLateStart": 409
+      },
+      "cursorEvents": 15,
+      "noDuplicatesOrLoss": true,
+      "lateStartDidNotRegressSuccess": true
+    },
+    "reconnect-result": {
+      "passed": true,
+      "requestId": "4ba5e673-ab64-489b-af14-8dbe584bc5a2",
+      "executionId": "42",
+      "offlineStatus": "running",
+      "offlineEvents": 1,
+      "recoveredEvents": 14,
+      "terminal": "run.completed",
+      "noDuplicatesOrLoss": true
+    },
+    "studio-result": {
+      "passed": true,
+      "requestId": "b3d490ff-b37b-4d1f-886c-ed22bf31397c",
+      "executionId": "46",
+      "adapterLocked": true,
+      "states": [
+        {
+          "nodeId": "node_trigger",
+          "state": "success"
+        },
+        {
+          "nodeId": "node_route",
+          "state": "success"
+        },
+        {
+          "nodeId": "node_agent",
+          "state": "success"
+        },
+        {
+          "nodeId": "node_model",
+          "state": "success"
+        },
+        {
+          "nodeId": "node_memory",
+          "state": "success"
+        },
+        {
+          "nodeId": "node_high",
+          "state": "success"
+        },
+        {
+          "nodeId": "node_normal",
+          "state": "skipped"
+        }
+      ],
+      "failure": {
+        "requestId": "c8d4fc1c-4efc-450e-94fd-7da6632a6b06",
+        "executionId": "48",
+        "errorNodes": 2,
+        "code": "LLM_ERROR",
+        "messageAndRedactedDetailVisible": true
+      },
+      "input": "Synthetic prompt supplied in outgoing request; no HTTP responses or telemetry mocked."
+    },
+    "rollback-check-v2": {
+      "passed": true,
+      "results": [
+        {
+          "urgency": "high",
+          "requestId": "b81d8126-6dc9-401f-9601-d8abf55183aa",
+          "executionId": "27",
+          "graphVersion": 2
+        },
+        {
+          "urgency": "normal",
+          "requestId": "6c61caa4-d510-464b-823d-6cd6a9e43436",
+          "executionId": "28",
+          "graphVersion": 2
+        }
+      ]
+    },
+    "rollback-check-v3": {
+      "passed": true,
+      "results": [
+        {
+          "urgency": "high",
+          "requestId": "37b7e0ba-24ac-4d22-ac1a-403d26d95949",
+          "executionId": "29",
+          "graphVersion": 3
+        },
+        {
+          "urgency": "normal",
+          "requestId": "55516cbc-c6ce-4816-b622-3337756c200a",
+          "executionId": "30",
+          "graphVersion": 3
+        }
+      ]
+    }
+  },
+  "observation": {
+    "startedAt": 1789251953981,
+    "elapsedMs": 1801075,
+    "complete": true,
+    "pass": true,
+    "samples": 121,
+    "maxStaleRunning": 0,
+    "finalRunning": 0
+  },
+  "currentRunning": 0,
+  "validation": [
+    {
+      "command": "npm test",
+      "exitCode": 0
+    },
+    {
+      "command": "npx tsc --noEmit",
+      "exitCode": 0
+    },
+    {
+      "command": "npx oxlint",
+      "exitCode": 0
+    },
+    {
+      "command": "npm run build",
+      "exitCode": 0
+    }
+  ],
+  "validationLogs": [
+    {
+      "file": "outputs/final-test.log",
+      "sha256": "2b770994b7c32d87377d1783cf32cfc0ba2022e7b1109865cfd87350d79c3e60"
+    },
+    {
+      "file": "outputs/final-tsc.log",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "file": "outputs/final-oxlint.log",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "file": "outputs/final-build.log",
+      "sha256": "5ea957a4cda8f912e6a0a37799e3af9ac8871129ba1a7ff505ba3af421c88726"
+    }
+  ],
+  "productionEnabled": false,
+  "deployLocked": true,
+  "remainingBlockers": [],
+  "outsideValidatedScope": [
+    "No production database, production n8n or production key accessed.",
+    "No offline production backup or source-version configuration was provided; production data upgrade remains unverified.",
+    "Cloud DashScope was not called. Local substitute covers success, 401, TCP disconnect and malformed JSON.",
+    "One pre-existing optional live Qwen key test remains skipped; the real local n8n canary was executed.",
+    "Forwarder replays finalized SQLite snapshots; live low-latency streaming, queue/HA and persistent multi-worker Memory are not implemented."
+  ]
+}

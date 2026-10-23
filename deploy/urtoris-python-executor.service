@@ -1,0 +1,23 @@
+[Unit]
+Description=Urtoris Python Executor
+After=network.target docker.service
+Requires=docker.service
+
+[Service]
+Type=simple
+User=urtoris-executor
+Group=urtoris-executor
+SupplementaryGroups=urtoris
+WorkingDirectory=/opt/urtoris/app
+EnvironmentFile=/etc/urtoris/python-executor.env
+ExecStart=/usr/bin/node --import tsx /opt/urtoris/app/services/python-executor/server.ts
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+ReadWritePaths=/var/lib/urtoris-python-executor
+
+[Install]
+WantedBy=multi-user.target

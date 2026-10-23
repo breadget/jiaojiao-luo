@@ -1,0 +1,118 @@
+name: Deploy Urtoris
+
+on:
+  push:
+    branches:
+      - codex/graph-runtime-canary
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: urtoris-production
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out the production commit
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Use Node.js 24 for the test harness
+        # The ESM module-mocking tests rely on Node 24's corrected mock.module
+        # behavior. Production is built again on the server's Node 22 runtime.
+        uses: actions/setup-node@v5
+        with:
+          node-version: 24.19.0
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci --no-audit --no-fund
+
+      - name: Test
+        # Test files mock shared ESM modules, so file-level parallelism would
+        # let one suite replace another suite's imports on Linux runners.
+        run: npm test -- --test-concurrency=1
+
+      - name: Type-check
+        run: npx tsc --noEmit
+
+      - name: Lint
+        run: npx oxlint
+
+      - name: Build
+        env:
+          NODE_OPTIONS: --max-old-space-size=512
+        run: npm run build
+
+  deploy:
+    needs: verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out the production commit
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Use Node.js 22 for the production runtime
+        uses: actions/setup-node@v5
+        with:
+          node-version: 22.13.0
+          cache: npm
+
+      - name: Install production runtime dependencies
+        run: npm ci --no-audit --no-fund
+
+      - name: Build the production runtime off-server
+        env:
+          NODE_OPTIONS: --max-old-space-size=512
+        run: npm run build
+
+      - name: Package a verifiable runtime artifact
+        run: |
+          set -euo pipefail
+          install -d -m 0750 "$GITHUB_WORKSPACE/dist/server/migrations"
+          cp -a drizzle/. "$GITHUB_WORKSPACE/dist/server/migrations/"
+          find "$GITHUB_WORKSPACE/dist/server/migrations" -type f \( -name '._*' -o -name '.__*' \) -delete
+          printf '%s\n' "$GITHUB_SHA" > "$GITHUB_WORKSPACE/URTORIS_RELEASE_SHA"
+          {
+            git ls-files -z
+            printf 'node_modules\0dist\0URTORIS_RELEASE_SHA\0'
+          } | tar --null --verbatim-files-from --files-from=- \
+            --create --gzip --file "$RUNNER_TEMP/urtoris-runtime.tar.gz"
+          test -s "$RUNNER_TEMP/urtoris-runtime.tar.gz"
+
+      - name: Deploy through the restricted SSH endpoint
+        env:
+          DEPLOY_KEY: ${{ secrets.URTORIS_DEPLOY_SSH_KEY }}
+        run: |
+          set -euo pipefail
+          test -n "$DEPLOY_KEY"
+          install -d -m 700 "$RUNNER_TEMP/ssh"
+          printf '%s\n' "$DEPLOY_KEY" > "$RUNNER_TEMP/ssh/key"
+          chmod 600 "$RUNNER_TEMP/ssh/key"
+          printf '%s\n' '8.133.252.143 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIICD1QBRJOmH2jt23j1e9DBPBXhYhmca1P/ptZ8R2s37' > "$RUNNER_TEMP/ssh/known_hosts"
+          {
+            printf 'URTORIS_RUNTIME_V1 %s\n' "$GITHUB_SHA"
+            cat "$RUNNER_TEMP/urtoris-runtime.tar.gz"
+          } | ssh \
+              -i "$RUNNER_TEMP/ssh/key" \
+              -o BatchMode=yes \
+              -o IdentitiesOnly=yes \
+              -o StrictHostKeyChecking=yes \
+              -o UserKnownHostsFile="$RUNNER_TEMP/ssh/known_hosts" \
+              urtoris-deploy@8.133.252.143
+
+      - name: Verify the Aliyun Studio directly
+        run: |
+          curl --fail --silent --show-error \
+            --retry 10 --retry-delay 3 --retry-all-errors \
+            --output /dev/null \
+            --resolve urtoris.cn:443:8.133.252.143 \
+            https://urtoris.cn/studio

@@ -18,6 +18,28 @@ export type LlmProtocol =
   | 'anthropic-messages'
   | 'google-generate-content';
 
+/** 用户可选的推理强度；auto 表示完全交给模型服务默认策略。 */
+export const LLM_REASONING_EFFORTS = ['auto', 'low', 'medium', 'high'] as const;
+
+export type LlmReasoningEffort = (typeof LLM_REASONING_EFFORTS)[number];
+
+/** 不同厂商表达“推理强度”的协议方式。 */
+export type LlmReasoningMode =
+  | 'openai-effort'
+  | 'qwen-thinking'
+  | 'anthropic-thinking'
+  | 'gemini-thinking'
+  | 'model-only';
+
+export function isLlmReasoningEffort(
+  value: unknown,
+): value is LlmReasoningEffort {
+  return (
+    typeof value === 'string' &&
+    (LLM_REASONING_EFFORTS as readonly string[]).includes(value)
+  );
+}
+
 export type LlmProvider = {
   id: string;
   /** 面向用户的名称。 */
@@ -39,6 +61,9 @@ export type LlmProvider = {
   /** 输入框提示语，只描述格式，不放真实凭据。 */
   keyHint: string;
   docsUrl: string;
+  /** 推理强度如何映射到厂商 API；model-only 表示只能通过模型名选择。 */
+  reasoningMode: LlmReasoningMode;
+  reasoningNote: string;
   note?: string;
 };
 
@@ -58,6 +83,8 @@ export const llmProviders: readonly LlmProvider[] = [
     keyRequired: true,
     keyHint: 'DashScope API Key（sk- 开头）',
     docsUrl: 'https://help.aliyun.com/zh/model-studio/',
+    reasoningMode: 'qwen-thinking',
+    reasoningNote: '低 / 中 / 高会映射为千问 thinking budget。',
   },
   {
     id: 'openai',
@@ -73,6 +100,8 @@ export const llmProviders: readonly LlmProvider[] = [
     keyRequired: true,
     keyHint: 'OpenAI API Key（sk- 开头）',
     docsUrl: 'https://platform.openai.com/docs/api-reference/chat',
+    reasoningMode: 'openai-effort',
+    reasoningNote: '支持时会把强度作为 reasoning_effort 发送。',
   },
   {
     id: 'deepseek',
@@ -88,6 +117,9 @@ export const llmProviders: readonly LlmProvider[] = [
     keyRequired: true,
     keyHint: 'DeepSeek API Key',
     docsUrl: 'https://api-docs.deepseek.com/',
+    reasoningMode: 'model-only',
+    reasoningNote:
+      'DeepSeek 通过模型名决定：需要推理请选择 deepseek-reasoner。',
   },
   {
     id: 'moonshot',
@@ -103,6 +135,8 @@ export const llmProviders: readonly LlmProvider[] = [
     keyRequired: true,
     keyHint: 'Moonshot API Key',
     docsUrl: 'https://platform.moonshot.cn/docs/api/chat',
+    reasoningMode: 'model-only',
+    reasoningNote: '该服务的推理能力由所选模型决定。',
     note: 'Kimi 的新模型名请以控制台为准，这里只放长期可用的几个。',
   },
   {
@@ -119,6 +153,8 @@ export const llmProviders: readonly LlmProvider[] = [
     keyRequired: true,
     keyHint: '智谱 API Key',
     docsUrl: 'https://docs.bigmodel.cn/',
+    reasoningMode: 'model-only',
+    reasoningNote: '该服务的推理能力由所选模型决定。',
   },
   {
     id: 'anthropic',
@@ -128,17 +164,15 @@ export const llmProviders: readonly LlmProvider[] = [
     defaultBaseUrl: 'https://api.anthropic.com',
     // Anthropic 官方提供 OpenAI SDK 兼容层，n8n 侧仍用已验证的 OpenAI 节点。
     openAiCompatibleBaseUrl: 'https://api.anthropic.com/v1',
-    models: [
-      'claude-sonnet-4-5',
-      'claude-opus-4-1',
-      'claude-3-5-haiku-latest',
-    ],
+    models: ['claude-sonnet-4-5', 'claude-opus-4-1', 'claude-3-5-haiku-latest'],
     defaultModel: 'claude-sonnet-4-5',
     requiresBaseUrl: false,
     requiresModel: false,
     keyRequired: true,
     keyHint: 'Anthropic API Key（sk-ant- 开头）',
     docsUrl: 'https://docs.anthropic.com/en/api/messages',
+    reasoningMode: 'anthropic-thinking',
+    reasoningNote: '低 / 中 / 高会映射为 Claude thinking budget。',
   },
   {
     id: 'gemini',
@@ -155,6 +189,8 @@ export const llmProviders: readonly LlmProvider[] = [
     keyRequired: true,
     keyHint: 'Google AI Studio API Key',
     docsUrl: 'https://ai.google.dev/api/generate-content',
+    reasoningMode: 'gemini-thinking',
+    reasoningNote: '低 / 中 / 高会映射为 Gemini thinking budget。',
   },
   {
     id: 'ollama',
@@ -170,6 +206,8 @@ export const llmProviders: readonly LlmProvider[] = [
     keyRequired: false,
     keyHint: '本机模型通常不需要 Key，留空即可',
     docsUrl: 'https://github.com/ollama/ollama/blob/main/docs/openai.md',
+    reasoningMode: 'model-only',
+    reasoningNote: '本机服务的推理能力由模型名与服务端配置决定。',
     note: '只在 https 之外放行本机地址；换成别的内网地址请用「自定义」。',
   },
   {
@@ -186,6 +224,8 @@ export const llmProviders: readonly LlmProvider[] = [
     keyRequired: true,
     keyHint: '该服务商签发的 Key',
     docsUrl: 'https://platform.openai.com/docs/api-reference/chat',
+    reasoningMode: 'openai-effort',
+    reasoningNote: '会按 OpenAI 兼容格式发送；若网关不支持请选“自动”。',
     note: '自建网关、代理、聚合平台都走这条：Base URL 必填，模型名手填。',
   },
 ] as const;
@@ -207,7 +247,9 @@ const providerAliases: Record<string, string> = {
   google: 'gemini',
 };
 
-export function findProvider(id: string | null | undefined): LlmProvider | null {
+export function findProvider(
+  id: string | null | undefined,
+): LlmProvider | null {
   if (typeof id !== 'string') return null;
   const normalized = normalizeProviderId(id);
   if (!normalized) return null;
@@ -264,6 +306,8 @@ export function providerOptions(): Array<{
   requiresModel: boolean;
   keyRequired: boolean;
   keyHint: string;
+  reasoningMode: LlmReasoningMode;
+  reasoningNote: string;
   note?: string;
 }> {
   return llmProviders.map((provider) => ({
@@ -277,6 +321,8 @@ export function providerOptions(): Array<{
     requiresModel: provider.requiresModel,
     keyRequired: provider.keyRequired,
     keyHint: provider.keyHint,
+    reasoningMode: provider.reasoningMode,
+    reasoningNote: provider.reasoningNote,
     ...(provider.note ? { note: provider.note } : {}),
   }));
 }
