@@ -42,6 +42,7 @@ import {
   MemoryStick,
   MousePointer2,
   PackageCheck,
+  Pencil,
   Play,
   Plus,
   Radio,
@@ -62,7 +63,6 @@ import {
   XCircle,
   Zap,
 } from 'lucide-react';
-import Link from 'next/link';
 import {
   useCallback,
   useEffect,
@@ -81,8 +81,10 @@ import {
 import { projectLegacyWorkflow } from '@/lib/workflow-graph/project-legacy';
 import {
   DEFAULT_LLM_PROVIDER_ID,
+  isLlmReasoningEffort,
   providerDefaults,
   providerOptions,
+  type LlmReasoningEffort,
 } from '@/lib/llm/providers';
 import type {
   ConnectionKind,
@@ -116,7 +118,18 @@ import {
   type RunTelemetryNode,
   type TelemetrySummary,
 } from '@/lib/workflow-graph/telemetry';
+import {
+  describeStudioRunResult,
+  planStudioRun,
+  type StudioRunTrace,
+} from '@/lib/workflow-graph/studio-run';
 import { validateGraph } from '@/lib/workflow-graph/validate';
+import {
+  parseStudioRunInput,
+  studioNodeRole,
+  type StudioRunInput,
+} from '@/lib/workflow-graph/studio-input';
+import { WorkflowTerminal } from './workflow-terminal';
 import type {
   StateResponse,
   WorkflowRecord,
@@ -129,11 +142,20 @@ const ADMIN_TOKEN_STORAGE_KEY = 'urtoris.admin.token.v1';
 const CREATOR_AGENT_STORAGE_KEY = 'urtoris.studio.creator-agent.v1';
 const DRAG_MIME = 'application/x-urtoris-node';
 
-const defaultCreatorAgentConfig = {
+type CreatorAgentConfig = {
+  provider: string;
+  apiKey: string;
+  baseUrl: string;
+  model: string;
+  reasoningEffort: LlmReasoningEffort;
+};
+
+const defaultCreatorAgentConfig: CreatorAgentConfig = {
   provider: DEFAULT_LLM_PROVIDER_ID,
   apiKey: '',
   baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
   model: 'qwen-plus',
+  reasoningEffort: 'auto',
 };
 
 const fallbackWorkflow: WorkflowRecord = {
@@ -315,8 +337,6 @@ type CreatorAgentProposal = WorkflowAgentProposal & {
   };
 };
 
-type CreatorAgentConfig = typeof defaultCreatorAgentConfig;
-
 type CreatorAgentUndo = {
   workflowId: string;
   graph: WorkflowGraphV1;
@@ -351,6 +371,14 @@ function formatDuration(duration?: number) {
   return duration >= 1000
     ? `${(duration / 1000).toFixed(2)} s`
     : `${duration} ms`;
+}
+
+function formatWorkflowDate(timestamp: number) {
+  if (!timestamp) return '演示数据';
+  return new Intl.DateTimeFormat('zh-CN', {
+    month: 'short',
+    day: 'numeric',
+  }).format(new Date(timestamp));
 }
 
 function isGraph(value: unknown): value is WorkflowGraphV1 {
@@ -477,6 +505,8 @@ function PortHandle({
       type={direction === 'input' ? 'target' : 'source'}
       position={position}
       className={`studio-handle studio-handle-${kind}`}
+      title={`${direction === 'input' ? '输入接口' : '输出接口'} · ${connectionKindLabel(kind)}`}
+      aria-label={`${direction === 'input' ? '输入接口' : '输出接口'} · ${connectionKindLabel(kind)}`}
       style={style}
     />
   );
@@ -584,7 +614,7 @@ function StudioCanvasNode({ data, selected }: NodeProps<CanvasNode>) {
         </span>
         <span className="studio-node-title">
           <strong>{node.name}</strong>
-          <small>{nodeRegistry[node.type].category}</small>
+          <small>{studioNodeRole(node.type)}</small>
         </span>
         <span
           className={`studio-node-status studio-node-status-${runtime.state}`}
@@ -595,7 +625,17 @@ function StudioCanvasNode({ data, selected }: NodeProps<CanvasNode>) {
       </div>
       <p>{node.description}</p>
       <div className="studio-node-meta">
-        <span>{nodeRegistry[node.type].capability}</span>
+        <span>
+          {isResource
+            ? nodeRegistry[node.type].capability
+            : node.type === 'trigger'
+              ? '接收输入 → 传入处理节点'
+              : node.type === 'output'
+                ? '接收处理结果 → 返回输出'
+                : node.type === 'condition'
+                  ? '输入 → 条件处理 → 分支输出'
+                  : '输入 → 处理 → 输出'}
+        </span>
         {formatDuration(runtime.durationMs) ? (
           <b>{formatDuration(runtime.durationMs)}</b>
         ) : null}
@@ -781,6 +821,15 @@ function StudioSurface() {
   const [adminTrusted, setAdminTrusted] = useState(false);
   /** 有令牌，或本机/内网访问被服务端当成管理员会话。 */
   const adminAuthorized = Boolean(adminToken.trim()) || adminTrusted;
+  const [workflowLibraryOpen, setWorkflowLibraryOpen] = useState(false);
+  const [workflowLibraryQuery, setWorkflowLibraryQuery] = useState('');
+  const [workflowLibraryMessage, setWorkflowLibraryMessage] = useState<
+    string | null
+  >(null);
+  const [workflowMutation, setWorkflowMutation] = useState<string | null>(null);
+  const [pendingWorkflowDelete, setPendingWorkflowDelete] = useState<
+    string | null
+  >(null);
   const [creatorAgentOpen, setCreatorAgentOpen] = useState(false);
   const [creatorAgentMode, setCreatorAgentMode] =
     useState<WorkflowAgentMode>('edit');
@@ -808,6 +857,9 @@ function StudioSurface() {
             typeof parsed.model === 'string' && parsed.model.trim()
               ? parsed.model
               : defaultCreatorAgentConfig.model,
+          reasoningEffort: isLlmReasoningEffort(parsed.reasoningEffort)
+            ? parsed.reasoningEffort
+            : 'auto',
         };
       } catch {
         return defaultCreatorAgentConfig;
@@ -819,6 +871,13 @@ function StudioSurface() {
   const [creatorAgentError, setCreatorAgentError] = useState<string | null>(
     null,
   );
+  const [creatorDiscoveredModels, setCreatorDiscoveredModels] = useState<
+    string[]
+  >([]);
+  const [creatorModelDiscovery, setCreatorModelDiscovery] = useState<{
+    status: 'idle' | 'loading' | 'success' | 'error';
+    message: string;
+  }>({ status: 'idle', message: '' });
   const [creatorAgentProposal, setCreatorAgentProposal] =
     useState<CreatorAgentProposal | null>(null);
   const [creatorAgentProposalBase, setCreatorAgentProposalBase] = useState<
@@ -836,16 +895,29 @@ function StudioSurface() {
     [],
   );
   const [executionTab, setExecutionTab] = useState<
-    'timeline' | 'input' | 'output' | 'log' | 'error'
-  >('timeline');
+    'terminal' | 'timeline' | 'input' | 'output' | 'log' | 'error'
+  >('terminal');
+  const [terminalInput, setTerminalInput] = useState('');
+  const [terminalInputError, setTerminalInputError] = useState<string | null>(
+    null,
+  );
+  const [terminalSubmittedInput, setTerminalSubmittedInput] = useState<
+    string | null
+  >(null);
+  const [terminalResponse, setTerminalResponse] = useState<{
+    data: unknown;
+  } | null>(null);
+  const [lastRunInput, setLastRunInput] = useState<StudioRunInput | null>(null);
+  const terminalInputRef = useRef<HTMLTextAreaElement>(null);
+  const terminalSessionRef = useRef('');
   const [runMeta, setRunMeta] = useState<{
     runId: string;
-    requestId: string;
+    requestId?: string;
     engine: string;
     mode: string;
     degraded: boolean;
     durationMs?: number;
-    trace: 'local-preview' | 'run-envelope';
+    trace: StudioRunTrace;
     output?: WorkflowRun['output'];
     error?: string;
   } | null>(null);
@@ -855,7 +927,12 @@ function StudioSurface() {
   const firstHydration = useRef(true);
   const graphRef = useRef(graph);
   const pendingCreatorAgentGraphRef = useRef<WorkflowGraphV1 | null>(null);
+  const workflowMetadataTargetRef = useRef<string | null>(null);
   const telemetryAbortRef = useRef<AbortController | null>(null);
+  const workflowNameInputRef = useRef<HTMLInputElement>(null);
+  const workflowLibraryRef = useRef<HTMLDialogElement>(null);
+  const workflowLibraryTriggerRef = useRef<HTMLButtonElement>(null);
+  const workflowLibraryCloseRef = useRef<HTMLButtonElement>(null);
   const inspectorRef = useRef<HTMLElement>(null);
   const inspectorTriggerRef = useRef<HTMLButtonElement>(null);
   const inspectorCloseRef = useRef<HTMLButtonElement>(null);
@@ -869,6 +946,14 @@ function StudioSurface() {
 
   useEffect(() => {
     return () => telemetryAbortRef.current?.abort();
+  }, []);
+
+  useEffect(() => {
+    if (
+      new URLSearchParams(window.location.search).get('panel') === 'workflows'
+    ) {
+      queueMicrotask(() => setWorkflowLibraryOpen(true));
+    }
   }, []);
 
   useEffect(() => {
@@ -985,6 +1070,58 @@ function StudioSurface() {
   }, [creatorAgentOpen]);
 
   useEffect(() => {
+    if (!workflowLibraryOpen) return;
+    const panel = workflowLibraryRef.current;
+    const fallbackTrigger = workflowLibraryTriggerRef.current;
+    const closeButton = workflowLibraryCloseRef.current;
+    const previous =
+      document.activeElement instanceof HTMLElement
+        ? document.activeElement
+        : fallbackTrigger;
+    const selector =
+      'button:not([disabled]), input:not([disabled]), textarea:not([disabled]), select:not([disabled]), [href], [tabindex]:not([tabindex="-1"])';
+    const focusable = () =>
+      Array.from(panel?.querySelectorAll<HTMLElement>(selector) ?? []).filter(
+        (element) => element.getClientRects().length > 0,
+      );
+    const focusTimer = window.setTimeout(
+      () => (closeButton ?? focusable()[0])?.focus(),
+      0,
+    );
+
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        setPendingWorkflowDelete(null);
+        setWorkflowLibraryOpen(false);
+        return;
+      }
+      if (event.key !== 'Tab') return;
+      const items = focusable();
+      const first = items[0];
+      const last = items.at(-1);
+      if (!first || !last) return;
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    };
+
+    document.addEventListener('keydown', handleKeyDown);
+    return () => {
+      window.clearTimeout(focusTimer);
+      document.removeEventListener('keydown', handleKeyDown);
+      window.requestAnimationFrame(() => {
+        const target = previous?.isConnected ? previous : fallbackTrigger;
+        target?.focus();
+      });
+    };
+  }, [workflowLibraryOpen]);
+
+  useEffect(() => {
     void fetch('/api/state', { cache: 'no-store' })
       .then(async (response) => {
         if (!response.ok) throw new Error('state unavailable');
@@ -1005,6 +1142,7 @@ function StudioSurface() {
 
   useEffect(() => {
     if (!workflow) return;
+    const editMetadata = workflowMetadataTargetRef.current === workflow.id;
     let nextGraph = projectLegacyWorkflow(workflow);
     let nextPersistence: 'projected' | 'local' | 'server' = 'projected';
     const pendingGraph = pendingCreatorAgentGraphRef.current;
@@ -1034,9 +1172,19 @@ function StudioSurface() {
     queueMicrotask(() => {
       setGraphPersistence(nextPersistence);
       setGraph(nextGraph);
-      setSelectedNodeId(preferredAgent?.id ?? nextGraph.nodes[0]?.id ?? null);
+      setSelectedNodeId(
+        editMetadata
+          ? null
+          : (preferredAgent?.id ?? nextGraph.nodes[0]?.id ?? null),
+      );
       setRuntime({});
       setExecutionEntries([]);
+      setTerminalInput('');
+      setTerminalInputError(null);
+      setTerminalSubmittedInput(null);
+      setTerminalResponse(null);
+      setLastRunInput(null);
+      terminalSessionRef.current = `studio_${randomId().slice(0, 16)}`;
       setRunMeta(null);
       setTelemetryMeta(null);
       setSaveState('idle');
@@ -1051,6 +1199,12 @@ function StudioSurface() {
       setCreatorAgentError(null);
       setFitRequest((current) => current + 1);
       firstHydration.current = false;
+      if (editMetadata) {
+        workflowMetadataTargetRef.current = null;
+        window.requestAnimationFrame(() =>
+          workflowNameInputRef.current?.focus(),
+        );
+      }
     });
   }, [workflow]);
 
@@ -1587,6 +1741,134 @@ function StudioSurface() {
     [adminToken],
   );
 
+  const openWorkflowFromLibrary = useCallback(
+    (targetId: string, editMetadata = false) => {
+      setWorkflowLibraryMessage(null);
+      setPendingWorkflowDelete(null);
+      if (editMetadata) {
+        workflowMetadataTargetRef.current = targetId;
+        setSelectedNodeId(null);
+        setSelectedEdgeId(null);
+      }
+      setWorkflowId(targetId);
+      setWorkflowLibraryOpen(false);
+      if (editMetadata && compactMode) setInspectorOpen(true);
+      if (editMetadata && targetId === workflowId) {
+        workflowMetadataTargetRef.current = null;
+        window.requestAnimationFrame(() =>
+          workflowNameInputRef.current?.focus(),
+        );
+      }
+    },
+    [compactMode, workflowId],
+  );
+
+  const createWorkflowFromLibrary = useCallback(async () => {
+    if (!adminAuthorized || serviceState !== 'connected') {
+      setWorkflowLibraryMessage(
+        adminTrusted
+          ? '工作流服务暂时不可用，请稍后重试。'
+          : '请先在 Inspector 填写管理员令牌，再新建工作流。',
+      );
+      return;
+    }
+
+    setWorkflowMutation('create');
+    setWorkflowLibraryMessage(null);
+    try {
+      const response = await authorizedFetch('/api/workflows', {
+        method: 'POST',
+        body: JSON.stringify({ action: 'create' }),
+      });
+      const data = (await response.json()) as {
+        workflow?: WorkflowRecord;
+        error?: string;
+      };
+      if (!response.ok || !data.workflow) {
+        throw new Error(data.error ?? '新建工作流失败。');
+      }
+      const created = data.workflow;
+      setWorkflows((current) => [
+        created,
+        ...current.filter((item) => item.id !== created.id),
+      ]);
+      workflowMetadataTargetRef.current = created.id;
+      setWorkflowId(created.id);
+      setSelectedNodeId(null);
+      setSelectedEdgeId(null);
+      setWorkflowLibraryOpen(false);
+      if (compactMode) setInspectorOpen(true);
+      setConnectionMessage('工作流已新建；填写名称和用途后点 Save。');
+    } catch (cause) {
+      setWorkflowLibraryMessage(
+        cause instanceof Error ? cause.message : '新建工作流失败。',
+      );
+    } finally {
+      setWorkflowMutation(null);
+    }
+  }, [
+    adminAuthorized,
+    adminTrusted,
+    authorizedFetch,
+    compactMode,
+    serviceState,
+  ]);
+
+  const deleteWorkflowFromLibrary = useCallback(
+    async (targetId: string) => {
+      if (!adminAuthorized || serviceState !== 'connected') {
+        setWorkflowLibraryMessage(
+          adminTrusted
+            ? '工作流服务暂时不可用，请稍后重试。'
+            : '请先在 Inspector 填写管理员令牌，再删除工作流。',
+        );
+        return;
+      }
+
+      setWorkflowMutation(targetId);
+      setWorkflowLibraryMessage(null);
+      try {
+        const response = await authorizedFetch(
+          `/api/workflows/${encodeURIComponent(targetId)}`,
+          { method: 'DELETE' },
+        );
+        const data = (await response.json()) as {
+          deleted?: boolean;
+          error?: string;
+        };
+        if (!response.ok || !data.deleted) {
+          throw new Error(data.error ?? '删除工作流失败。');
+        }
+
+        const remaining = workflows.filter((item) => item.id !== targetId);
+        setWorkflows(remaining);
+        setPendingWorkflowDelete(null);
+        try {
+          window.localStorage.removeItem(graphStorageKey(targetId));
+        } catch {
+          // 浏览器禁用本地存储时，服务端删除仍然有效。
+        }
+        if (workflowId === targetId && remaining[0]) {
+          setWorkflowId(remaining[0].id);
+        }
+      } catch (cause) {
+        setWorkflowLibraryMessage(
+          cause instanceof Error ? cause.message : '删除工作流失败。',
+        );
+      } finally {
+        setWorkflowMutation(null);
+      }
+    },
+    [
+      adminAuthorized,
+      adminTrusted,
+      authorizedFetch,
+      serviceState,
+      workflowId,
+      workflows,
+    ],
+  );
+
   const canUseServer =
     serviceState === 'connected' &&
     (Boolean(adminToken.trim()) || adminTrusted);
@@ -1602,6 +1884,12 @@ function StudioSurface() {
   const creatorAgentProvider = providerOptions().find(
     (item) => item.id === creatorAgentConfig.provider,
   );
+  const creatorSelectableModels = Array.from(
+    new Set([
+      ...(creatorAgentProvider?.models ?? []),
+      ...creatorDiscoveredModels,
+    ]),
+  );
   const creatorAgentKeyRequired = creatorAgentProvider?.keyRequired ?? true;
 
   const creatorAgentProposalStale = Boolean(
@@ -1615,6 +1903,45 @@ function StudioSurface() {
   const compilePreviewStale = Boolean(
     compilePreview && compilePreviewBase !== JSON.stringify(graph),
   );
+
+  const discoverCreatorModels = useCallback(async () => {
+    setCreatorModelDiscovery({
+      status: 'loading',
+      message: '正在读取模型…',
+    });
+    try {
+      const response = await authorizedFetch('/api/llm/models', {
+        method: 'POST',
+        body: JSON.stringify({
+          provider: creatorAgentConfig.provider,
+          apiKey: creatorAgentConfig.apiKey.trim() || undefined,
+          baseUrl: creatorAgentConfig.baseUrl.trim() || undefined,
+        }),
+      });
+      const data = (await response.json()) as {
+        models?: string[];
+        error?: string;
+      };
+      if (!response.ok || !Array.isArray(data.models)) {
+        throw new Error(data.error ?? '没有读到模型列表。');
+      }
+      setCreatorDiscoveredModels(data.models);
+      setCreatorAgentConfig((current) => ({
+        ...current,
+        model: current.model.trim() || data.models?.[0] || '',
+      }));
+      setCreatorModelDiscovery({
+        status: 'success',
+        message: `已识别 ${data.models.length} 个模型`,
+      });
+    } catch (cause) {
+      setCreatorDiscoveredModels([]);
+      setCreatorModelDiscovery({
+        status: 'error',
+        message: cause instanceof Error ? cause.message : '读取模型失败。',
+      });
+    }
+  }, [authorizedFetch, creatorAgentConfig]);
 
   const requestCreatorAgentProposal = useCallback(async () => {
     if (!canUseCreatorAgent) {
@@ -1651,6 +1978,7 @@ function StudioSurface() {
           apiKey: creatorAgentConfig.apiKey.trim(),
           baseUrl: creatorAgentConfig.baseUrl.trim(),
           model: creatorAgentConfig.model.trim(),
+          reasoningEffort: creatorAgentConfig.reasoningEffort,
           ...(creatorAgentMode === 'edit' ? { graph } : {}),
         }),
       });
@@ -2306,7 +2634,7 @@ function StudioSurface() {
   }, [graph]);
 
   const animatePreview = useCallback(
-    async (requestId: string) => {
+    async (requestId: string, input: StudioRunInput) => {
       const path = previewPath();
       const pathIds = new Set(path.map((node) => node.id));
       const initial = Object.fromEntries(
@@ -2327,7 +2655,7 @@ function StudioSurface() {
           ...current,
           [node.id]: {
             state: 'running',
-            input: { requestId, preview: true },
+            input: { requestId, preview: true, ...input },
           },
         }));
         pushEntry({
@@ -2381,125 +2709,185 @@ function StudioSurface() {
     [graph.edges, graph.nodes, previewPath, pushEntry],
   );
 
-  const runWorkflow = useCallback(async () => {
-    if (running || !graph.entryNodeIds.length) return;
-    setRunning(true);
-    setExecutionTab('timeline');
-    setExecutionEntries([]);
-    abortTelemetry();
-    setTelemetryMeta(null);
-    const startedAt = Date.now();
-    const previewRequestId = `req_${randomId().slice(0, 12)}`;
-    setRunMeta({
-      runId: `preview_${randomId().slice(0, 8)}`,
-      requestId: previewRequestId,
-      engine: workflow.publishedSteps ? 'n8n / compatible' : 'studio preview',
-      mode: workflow.publishedSteps ? 'rules or llm' : 'simulated',
-      degraded: !workflow.publishedSteps,
-      trace: workflow.publishedSteps ? 'run-envelope' : 'local-preview',
-    });
-    pushEntry({
-      level: 'info',
-      message: workflow.publishedSteps
-        ? '正在运行既有发布绑定；当前 Graph 尚未编译进 n8n。'
-        : '启动本地 Graph 预演；节点状态和耗时均为演示数据。',
-    });
+  const runWorkflow = useCallback(
+    async (input: StudioRunInput) => {
+      if (running) return;
+      if (!graph.entryNodeIds.length && !workflow.publishedSteps) {
+        setTerminalInputError('请先添加并连接一个输入节点。');
+        return;
+      }
+      setRunning(true);
+      setExecutionTab('terminal');
+      setExecutionEntries([]);
+      setTerminalInputError(null);
+      setTerminalSubmittedInput(terminalInput.trim());
+      setTerminalResponse(null);
+      setLastRunInput(input);
+      setRuntime({});
+      abortTelemetry();
+      setTelemetryMeta(null);
+      const startedAt = Date.now();
+      const previewRequestId = `req_${randomId().slice(0, 12)}`;
+      const runPlan = planStudioRun(workflow);
+      const initialRunMeta = {
+        runId: `preview_${randomId().slice(0, 8)}`,
+        requestId: runPlan.kind === 'preview' ? previewRequestId : undefined,
+        engine: runPlan.engine,
+        mode: runPlan.mode,
+        degraded: runPlan.degraded,
+        trace: runPlan.trace,
+      };
+      setRunMeta(initialRunMeta);
+      pushEntry({
+        level: 'info',
+        message: runPlan.message,
+      });
 
-    let actualRun: WorkflowRun | undefined;
-    let shouldPreview = !workflow.publishedSteps;
-    if (workflow.publishedSteps) {
-      try {
-        const response = await fetch('/api/runs', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ workflowId: workflow.id }),
-        });
-        const data = (await response.json()) as {
-          run?: WorkflowRun;
-          error?: string;
-        };
-        if (!response.ok || !data.run) {
-          throw new Error(data.error ?? '运行接口没有返回结果');
-        }
-        actualRun = data.run;
-        setRunMeta({
-          runId: actualRun.id,
-          requestId: actualRun.requestId ?? previewRequestId,
-          engine: actualRun.engine ?? 'n8n',
-          mode: actualRun.mode ?? 'rules',
-          degraded: Boolean(actualRun.degraded),
-          durationMs: actualRun.durationMs ?? undefined,
-          trace: 'run-envelope',
-          output: actualRun.output,
-          error: actualRun.errorMessage ?? undefined,
-        });
-        setRuntime({});
-        pushEntry({
-          level: actualRun.status === 'failed' ? 'error' : 'success',
-          message:
-            actualRun.status === 'failed'
-              ? `既有绑定执行失败：${actualRun.errorMessage ?? '未返回公开错误详情'}。节点状态只来自真实遥测。`
-              : '既有绑定已返回运行信封。正在读取节点级遥测，未收到事件的节点保持 idle。',
-        });
-        // 节点状态随后由遥测补齐：没有事件就保持 idle，不播合成动画。
-        if (actualRun.requestId) {
-          abortTelemetry();
-          const controller = new AbortController();
-          telemetryAbortRef.current = controller;
-          void pollRunTelemetry(actualRun.requestId, controller.signal);
-        } else {
-          setTelemetryMeta({
-            status: 'unavailable',
-            binding: null,
-            boundVersion: null,
-            bindingCount: 0,
-            eventCount: 0,
-            summary: null,
-            unmappedNodes: [],
-            message: '运行记录没有 requestId，无法读取节点遥测。',
+      let actualRun: WorkflowRun | undefined;
+      const shouldPreview = !runPlan.executePublished;
+      if (runPlan.executePublished) {
+        try {
+          const response = await fetch('/api/runs', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              workflowId: workflow.id,
+              ...input,
+              requestId: previewRequestId,
+              sessionId: input.sessionId ?? terminalSessionRef.current,
+            }),
+          });
+          const data = (await response.json()) as {
+            run?: WorkflowRun;
+            envelope?: { data?: unknown };
+            error?: string;
+          };
+          if (!response.ok || !data.run) {
+            throw new Error(data.error ?? '运行接口没有返回结果');
+          }
+          actualRun = data.run;
+          for (const log of actualRun.logs ?? []) {
+            pushEntry({
+              level: log.level === 'system' ? 'info' : log.level,
+              message: log.message,
+            });
+          }
+          if (actualRun.status !== 'failed') {
+            setTerminalResponse({
+              data:
+                data.envelope && 'data' in data.envelope
+                  ? data.envelope.data
+                  : actualRun.output,
+            });
+          }
+          const resultDescription = describeStudioRunResult(actualRun);
+          setRunMeta({
+            runId: actualRun.id,
+            requestId: actualRun.requestId ?? undefined,
+            engine: actualRun.engine ?? 'n8n',
+            mode: actualRun.mode ?? 'rules',
+            degraded: Boolean(actualRun.degraded),
+            durationMs: actualRun.durationMs ?? undefined,
+            trace: resultDescription.trace,
+            output: actualRun.output,
+            error:
+              actualRun.status === 'failed'
+                ? (actualRun.errorMessage ?? '工作流执行失败。')
+                : undefined,
+          });
+          setRuntime({});
+          pushEntry({
+            level: actualRun.status === 'failed' ? 'error' : 'success',
+            message: resultDescription.message,
+          });
+          // 只有真实 n8n run 才读节点遥测；没有事件就保持 idle。
+          if (resultDescription.shouldPollTelemetry && actualRun.requestId) {
+            abortTelemetry();
+            const controller = new AbortController();
+            telemetryAbortRef.current = controller;
+            void pollRunTelemetry(actualRun.requestId, controller.signal);
+          } else if (resultDescription.telemetryUnavailableMessage) {
+            setTelemetryMeta({
+              status: 'unavailable',
+              binding: null,
+              boundVersion: null,
+              bindingCount: 0,
+              eventCount: 0,
+              summary: null,
+              unmappedNodes: [],
+              message: resultDescription.telemetryUnavailableMessage,
+            });
+          }
+        } catch (cause) {
+          const failureMessage =
+            cause instanceof Error ? cause.message : '运行接口不可用';
+          setRunMeta({ ...initialRunMeta, error: failureMessage });
+          pushEntry({
+            level: 'error',
+            message: failureMessage,
           });
         }
-      } catch (cause) {
-        shouldPreview = true;
+      }
+
+      if (shouldPreview) {
+        await animatePreview(previewRequestId, input);
+        const previewOutput = {
+          preview: true,
+          message: '本地预演完成；尚未调用真实工作流处理器。',
+          input: input.input ?? { message: input.message },
+        };
+        setTerminalResponse({ data: previewOutput });
         setRunMeta((current) =>
           current
             ? {
                 ...current,
-                engine: 'studio preview',
-                mode: 'simulated',
-                degraded: true,
-                trace: 'local-preview',
+                output: {
+                  summary: '本地 Graph 预演',
+                  processed: 0,
+                  result: JSON.stringify(previewOutput),
+                },
               }
             : current,
         );
-        pushEntry({
-          level: 'error',
-          message: `${
-            cause instanceof Error ? cause.message : '运行接口不可用'
-          }；改用本地预演，不伪装为真实 AI。`,
-        });
       }
-    }
+      const durationMs = Date.now() - startedAt;
+      setRunMeta((current) =>
+        current
+          ? { ...current, durationMs: current.durationMs ?? durationMs }
+          : null,
+      );
+      setRunning(false);
+      window.requestAnimationFrame(() => terminalInputRef.current?.focus());
+    },
+    [
+      abortTelemetry,
+      animatePreview,
+      graph.entryNodeIds.length,
+      pollRunTelemetry,
+      pushEntry,
+      running,
+      terminalInput,
+      workflow,
+    ],
+  );
 
-    if (shouldPreview) {
-      await animatePreview(actualRun?.requestId ?? previewRequestId);
+  const submitTerminalInput = useCallback(() => {
+    if (running) return;
+    try {
+      const input = parseStudioRunInput(terminalInput);
+      void runWorkflow(input);
+    } catch (cause) {
+      setTerminalInputError(
+        cause instanceof Error ? cause.message : '输入格式有误。',
+      );
     }
-    const durationMs = Date.now() - startedAt;
-    setRunMeta((current) =>
-      current
-        ? { ...current, durationMs: current.durationMs ?? durationMs }
-        : null,
-    );
-    setRunning(false);
-  }, [
-    abortTelemetry,
-    animatePreview,
-    graph.entryNodeIds.length,
-    pollRunTelemetry,
-    pushEntry,
-    running,
-    workflow,
-  ]);
+  }, [runWorkflow, running, terminalInput]);
+
+  const openRunTerminal = useCallback(() => {
+    setExecutionTab('terminal');
+    setInspectorOpen(false);
+    window.requestAnimationFrame(() => terminalInputRef.current?.focus());
+  }, []);
 
   const filteredPalette = useMemo(() => {
     const normalized = query.trim().toLowerCase();
@@ -2521,6 +2909,12 @@ function StudioSurface() {
   const telemetryBadge = useMemo(() => {
     if (!runMeta) return null;
     if (runMeta.trace !== 'run-envelope') {
+      if (runMeta.trace === 'simulated-run') {
+        return {
+          label: '内置模拟 · 无 n8n 节点遥测',
+          tone: 'off' as const,
+        };
+      }
       return {
         label: 'LOCAL PREVIEW · SYNTHETIC NODE DATA',
         tone: '' as const,
@@ -2572,13 +2966,25 @@ function StudioSurface() {
     return `${telemetryMeta.binding ?? 'unknown'} · v${telemetryMeta.boundVersion ?? '—'} · ${telemetryMeta.bindingCount} 条`;
   }, [telemetryMeta]);
 
+  const visibleWorkflowLibrary = useMemo(() => {
+    const normalized = workflowLibraryQuery.trim().toLocaleLowerCase('zh-CN');
+    if (!normalized) return workflows;
+    return workflows.filter((item) =>
+      `${item.name}\n${item.description}`
+        .toLocaleLowerCase('zh-CN')
+        .includes(normalized),
+    );
+  }, [workflowLibraryQuery, workflows]);
+  const studioOverlayOpen = creatorAgentOpen || workflowLibraryOpen;
+
   return (
     <main className="studio-shell">
-      <header className="studio-topbar" inert={creatorAgentOpen}>
+      <header className="studio-topbar" inert={studioOverlayOpen}>
         <div className="studio-brand-zone">
-          <Link className="studio-back" href="/" aria-label="返回双端入口">
+          {/* oxlint-disable-next-line next/no-html-link-for-pages -- Vinext 客户端路由异常；返回入口需要文档跳转。 */}
+          <a className="studio-back" href="/" aria-label="返回双端入口">
             <ArrowLeft />
-          </Link>
+          </a>
           <span className="studio-brand-mark" aria-hidden="true">
             <Workflow />
           </span>
@@ -2586,10 +2992,29 @@ function StudioSurface() {
             <strong>Urtoris</strong>
             <small>Workflow Studio</small>
           </div>
+          <button
+            ref={workflowLibraryTriggerRef}
+            type="button"
+            className="studio-library-trigger"
+            disabled={running}
+            aria-label={`打开工作流列表，共 ${workflows.length} 个`}
+            aria-expanded={workflowLibraryOpen}
+            aria-controls="studio-workflow-library"
+            onClick={() => {
+              setInspectorOpen(false);
+              setWorkflowLibraryMessage(null);
+              setWorkflowLibraryOpen(true);
+            }}
+          >
+            <Workflow />
+            <span>工作流</span>
+            <b>{workflows.length}</b>
+          </button>
         </div>
 
         <div className="studio-workflow-title">
           <input
+            ref={workflowNameInputRef}
             aria-label="工作流名称"
             value={graph.name}
             onChange={(event) =>
@@ -2628,10 +3053,10 @@ function StudioSurface() {
             }
             title={
               workflow.publishedSteps
-                ? '运行既有发布绑定；不会执行尚未编译的 Graph'
-                : '本地预演 Graph；节点遥测为演示数据'
+                ? '打开运行终端，输入内容后运行既有发布绑定'
+                : '打开预演终端，输入内容后进行本地 Graph 预演'
             }
-            onClick={() => void runWorkflow()}
+            onClick={openRunTerminal}
           >
             {running ? <Loader2 className="studio-spin" /> : <Play />}
             {running
@@ -2644,6 +3069,8 @@ function StudioSurface() {
             type="button"
             className="studio-button"
             disabled={saveState === 'saving'}
+            aria-label={saveState === 'saved' ? '工作流已保存' : '保存工作流'}
+            title={saveState === 'saved' ? '工作流已保存' : '保存工作流'}
             onClick={() => void saveGraph()}
           >
             {saveState === 'saving' ? (
@@ -2660,6 +3087,7 @@ function StudioSurface() {
             type="button"
             className="studio-button studio-button-agent"
             aria-label="打开辅助 Agent（只改画布）"
+            title="打开辅助 Agent（只改画布）"
             aria-expanded={creatorAgentOpen}
             aria-controls="studio-creator-agent"
             onClick={() => {
@@ -2672,8 +3100,9 @@ function StudioSurface() {
           </button>
           <button
             type="button"
-            className="studio-button"
+            className="studio-button studio-button-compile"
             disabled={!canUseServer || releaseState === 'working'}
+            aria-label="编译预览"
             title="只读编译：把当前画布编译成 n8n JSON 并列出错误与警告，不写库、不导入"
             onClick={() => void previewCompile()}
           >
@@ -2686,8 +3115,9 @@ function StudioSurface() {
           </button>
           <button
             type="button"
-            className="studio-button"
+            className="studio-button studio-button-publish"
             disabled={!canUseServer || releaseState === 'working'}
+            aria-label="发布工作流快照"
             title="把已保存的草稿固化为不可变发布版本（不导入 n8n）"
             onClick={() => void publishGraph()}
           >
@@ -2712,6 +3142,7 @@ function StudioSurface() {
             type="button"
             className="studio-button studio-button-inspector"
             aria-label="打开 Inspector"
+            title="打开 Inspector"
             aria-expanded={inspectorOpen}
             onClick={() => {
               setInspectorOpen(true);
@@ -2723,7 +3154,7 @@ function StudioSurface() {
         </div>
       </header>
 
-      <section className="studio-grid" inert={creatorAgentOpen}>
+      <section className="studio-grid" inert={studioOverlayOpen}>
         <aside
           className="studio-palette"
           aria-label="节点库"
@@ -2774,7 +3205,7 @@ function StudioSurface() {
                         </span>
                         <span>
                           <strong>{definition.label}</strong>
-                          <small>{definition.capability}</small>
+                          <small>{studioNodeRole(type)}</small>
                         </span>
                         {definition.risk === 'high' ? (
                           <ShieldAlert className="studio-risk-icon" />
@@ -2788,7 +3219,7 @@ function StudioSurface() {
           </div>
           <div className="studio-palette-foot">
             <MousePointer2 />
-            <span>拖动画布 · 滚轮缩放 · 端口连线</span>
+            <span>拖动画布 · 滚轮缩放 · 端口连线 · 点线删除</span>
           </div>
         </aside>
 
@@ -2824,9 +3255,6 @@ function StudioSurface() {
               onEdgeClick={(_, edge) => {
                 setSelectedEdgeId(edge.id);
                 setSelectedNodeId(null);
-                if (compactMode) {
-                  setInspectorOpen(true);
-                }
               }}
               onPaneClick={() => {
                 setSelectedNodeId(null);
@@ -2847,7 +3275,7 @@ function StudioSurface() {
               }}
               minZoom={0.2}
               maxZoom={2}
-              defaultEdgeOptions={{ type: 'default' }}
+              defaultEdgeOptions={{ type: 'default', interactionWidth: 28 }}
               proOptions={{ hideAttribution: true }}
               deleteKeyCode={['Backspace', 'Delete']}
             >
@@ -2859,6 +3287,20 @@ function StudioSurface() {
               />
               <Controls showInteractive={false} position="bottom-left" />
             </ReactFlow>
+            {selectedEdge ? (
+              <button
+                type="button"
+                className="studio-delete-edge"
+                title={
+                  selectedEdgeEndpoints
+                    ? `删除 ${selectedEdgeEndpoints.sourceNodeName} → ${selectedEdgeEndpoints.targetNodeName} 的连线`
+                    : '删除选中的连线'
+                }
+                onClick={() => removeEdge(selectedEdge.id)}
+              >
+                <Trash2 aria-hidden="true" /> 删除连线
+              </button>
+            ) : null}
             <div className="studio-canvas-legend" aria-label="连接图例">
               {(['main', 'model', 'memory', 'tool'] as ConnectionKind[]).map(
                 (kind) => (
@@ -2896,7 +3338,7 @@ function StudioSurface() {
             <div className="studio-runtime-boundary">
               <LockKeyhole />
               <span>
-                DRAFT GRAPH · 可编译预览与发布快照 · Run 仅调用既有发布绑定
+                DRAFT GRAPH · 可编译预览与发布快照 · Run 按当前 Webhook 绑定执行
               </span>
             </div>
             {connectionMessage ? (
@@ -2909,11 +3351,12 @@ function StudioSurface() {
               <nav aria-label="运行详情标签">
                 {(
                   [
-                    ['timeline', 'Timeline'],
-                    ['input', 'Input'],
-                    ['output', 'Output'],
-                    ['log', 'Log'],
-                    ['error', 'Error'],
+                    ['terminal', '终端'],
+                    ['timeline', '过程'],
+                    ['input', '输入'],
+                    ['output', '输出'],
+                    ['log', '日志'],
+                    ['error', '错误'],
                   ] as const
                 ).map(([id, label]) => (
                   <button
@@ -2941,12 +3384,31 @@ function StudioSurface() {
                 ) : null}
                 <div className="studio-run-id">
                   <Activity />
-                  {runMeta?.requestId ?? 'NO ACTIVE RUN'}
+                  {runMeta?.requestId ?? runMeta?.runId ?? 'NO ACTIVE RUN'}
                 </div>
               </div>
             </header>
-            <div className="studio-execution-body">
-              {executionTab === 'timeline' ? (
+            <div
+              className={`studio-execution-body${executionTab === 'terminal' ? ' studio-execution-body-terminal' : ''}`}
+            >
+              {executionTab === 'terminal' ? (
+                <WorkflowTerminal
+                  graph={graph}
+                  input={terminalInput}
+                  submittedInput={terminalSubmittedInput}
+                  inputError={terminalInputError}
+                  entries={executionEntries}
+                  response={terminalResponse}
+                  error={runMeta?.error}
+                  running={running}
+                  inputRef={terminalInputRef}
+                  onInputChange={(value) => {
+                    setTerminalInput(value);
+                    setTerminalInputError(null);
+                  }}
+                  onSubmit={submitTerminalInput}
+                />
+              ) : executionTab === 'timeline' ? (
                 executionEntries.length ? (
                   <ol className="studio-timeline">
                     {executionEntries.map((entry) => (
@@ -2964,18 +3426,20 @@ function StudioSurface() {
                   <div className="studio-empty-execution">
                     <Zap />
                     <span>
-                      Preview 会显示明确标注的合成节点数据；Run binding
-                      只显示真实运行信封与节点遥测，没收到事件的节点保持 idle。
+                      Preview 会显示明确标注的合成节点数据；绑定 n8n 的 Run
+                      显示真实运行与节点遥测，未绑定时显示内置模拟结果。
                     </span>
                   </div>
                 )
               ) : executionTab === 'input' ? (
                 <pre>
                   {JSON.stringify(
-                    selectedRuntime?.input ?? {
-                      requestId: runMeta?.requestId,
-                      trace: runMeta?.trace,
-                    },
+                    selectedRuntime?.input ??
+                      lastRunInput ?? {
+                        runId: runMeta?.runId,
+                        requestId: runMeta?.requestId,
+                        trace: runMeta?.trace,
+                      },
                     null,
                     2,
                   )}
@@ -2983,7 +3447,10 @@ function StudioSurface() {
               ) : executionTab === 'output' ? (
                 <pre>
                   {JSON.stringify(
-                    selectedRuntime?.output ?? runMeta?.output ?? {},
+                    selectedRuntime?.output ??
+                      terminalResponse?.data ??
+                      runMeta?.output ??
+                      {},
                     null,
                     2,
                   )}
@@ -3029,9 +3496,11 @@ function StudioSurface() {
                       ? telemetryMeta?.bindingCount
                         ? 'run envelope + node telemetry'
                         : 'run envelope only'
-                      : runMeta
-                        ? 'local preview'
-                        : '—'}
+                      : runMeta?.trace === 'simulated-run'
+                        ? 'simulated result only'
+                        : runMeta
+                          ? 'local preview'
+                          : '—'}
                   </dd>
                 </div>
                 <div>
@@ -3383,7 +3852,7 @@ function StudioSurface() {
               </section>
 
               <section className="studio-inspector-section">
-                <h2>Ports</h2>
+                <h2>输入 / 输出接口</h2>
                 <ul className="studio-port-list">
                   {selectedNode.ports.map((port) => {
                     const connections = graph.edges.filter(
@@ -3397,8 +3866,14 @@ function StudioSurface() {
                       <li key={port.id}>
                         <i style={{ backgroundColor: kindColor[port.kind] }} />
                         <span>
-                          <strong>{port.label}</strong>
-                          <small>{port.direction}</small>
+                          <strong>
+                            {port.kind === 'main' ? '数据' : port.label}
+                          </strong>
+                          <small>
+                            {port.direction === 'input'
+                              ? '输入接口'
+                              : '输出接口'}
+                          </small>
                         </span>
                         <b>{connections}</b>
                       </li>
@@ -3449,6 +3924,23 @@ function StudioSurface() {
               <section className="studio-inspector-section">
                 <h2>Workflow</h2>
                 <label>
+                  <span>Name</span>
+                  <input
+                    value={graph.name}
+                    maxLength={80}
+                    onChange={(event) =>
+                      setGraph((current) => ({
+                        ...current,
+                        name: event.target.value,
+                        metadata: {
+                          ...current.metadata,
+                          updatedAt: Date.now(),
+                        },
+                      }))
+                    }
+                  />
+                </label>
+                <label>
                   <span>Description</span>
                   <textarea
                     rows={4}
@@ -3457,6 +3949,10 @@ function StudioSurface() {
                       setGraph((current) => ({
                         ...current,
                         description: event.target.value,
+                        metadata: {
+                          ...current.metadata,
+                          updatedAt: Date.now(),
+                        },
                       }))
                     }
                   />
@@ -3677,6 +4173,217 @@ function StudioSurface() {
         </aside>
       </section>
 
+      {workflowLibraryOpen ? (
+        <>
+          <button
+            type="button"
+            className="studio-library-backdrop"
+            aria-label="关闭工作流列表"
+            onClick={() => {
+              setPendingWorkflowDelete(null);
+              setWorkflowLibraryOpen(false);
+            }}
+          />
+          <dialog
+            open
+            ref={workflowLibraryRef}
+            id="studio-workflow-library"
+            className="studio-library-panel"
+            aria-modal="true"
+            aria-labelledby="studio-workflow-library-title"
+          >
+            <header className="studio-library-heading">
+              <span className="studio-library-mark" aria-hidden="true">
+                <Workflow />
+              </span>
+              <div>
+                <strong id="studio-workflow-library-title">工作流</strong>
+                <span>{workflows.length} 个可编辑工作流</span>
+              </div>
+              <button
+                ref={workflowLibraryCloseRef}
+                type="button"
+                className="studio-library-close"
+                aria-label="关闭工作流列表"
+                onClick={() => {
+                  setPendingWorkflowDelete(null);
+                  setWorkflowLibraryOpen(false);
+                }}
+              >
+                <X />
+              </button>
+            </header>
+
+            <div className="studio-library-toolbar">
+              <label className="studio-library-search">
+                <Search aria-hidden="true" />
+                <span className="sr-only">搜索工作流</span>
+                <input
+                  value={workflowLibraryQuery}
+                  onChange={(event) =>
+                    setWorkflowLibraryQuery(event.target.value)
+                  }
+                  placeholder="按名称或用途搜索"
+                  autoComplete="off"
+                />
+              </label>
+              <button
+                type="button"
+                className="studio-library-create"
+                disabled={workflowMutation !== null}
+                onClick={() => void createWorkflowFromLibrary()}
+              >
+                {workflowMutation === 'create' ? (
+                  <Loader2 className="studio-spin" />
+                ) : (
+                  <Plus />
+                )}
+                {workflowMutation === 'create' ? '正在新建' : '新建'}
+              </button>
+            </div>
+
+            {workflowLibraryMessage ? (
+              <p className="studio-library-message" role="alert">
+                <CircleAlert aria-hidden="true" />
+                {workflowLibraryMessage}
+              </p>
+            ) : null}
+
+            <div className="studio-library-scroll">
+              {visibleWorkflowLibrary.length ? (
+                <ul className="studio-library-list">
+                  {visibleWorkflowLibrary.map((item) => {
+                    const isActive = item.id === workflowId;
+                    const isDeleting = workflowMutation === item.id;
+                    const confirmingDelete = pendingWorkflowDelete === item.id;
+                    return (
+                      <li
+                        key={item.id}
+                        className={isActive ? 'is-active' : undefined}
+                      >
+                        <button
+                          type="button"
+                          className="studio-library-main"
+                          aria-current={isActive ? 'page' : undefined}
+                          onClick={() => openWorkflowFromLibrary(item.id)}
+                        >
+                          <span className="studio-library-row-mark">
+                            <Workflow aria-hidden="true" />
+                          </span>
+                          <span className="studio-library-copy">
+                            <strong>{item.name || '未命名工作流'}</strong>
+                            <small>
+                              {item.description || '还没有填写用途说明'}
+                            </small>
+                            <span className="studio-library-meta">
+                              <b>
+                                {item.publishedSteps
+                                  ? `v${item.version}`
+                                  : '草稿'}
+                              </b>
+                              <b>{item.draftSteps.length} 个步骤</b>
+                              <time
+                                dateTime={new Date(
+                                  item.updatedAt,
+                                ).toISOString()}
+                              >
+                                {formatWorkflowDate(item.updatedAt)} 更新
+                              </time>
+                            </span>
+                          </span>
+                        </button>
+                        <div className="studio-library-row-actions">
+                          <button
+                            type="button"
+                            aria-label={`编辑 ${item.name}`}
+                            title="编辑名称、用途和画布"
+                            disabled={workflowMutation !== null}
+                            onClick={() =>
+                              openWorkflowFromLibrary(item.id, true)
+                            }
+                          >
+                            <Pencil aria-hidden="true" />
+                          </button>
+                          <button
+                            type="button"
+                            className="is-danger"
+                            aria-label={`删除 ${item.name}`}
+                            title={
+                              workflows.length <= 1
+                                ? '至少保留一个工作流'
+                                : '从列表删除，历史记录会保留'
+                            }
+                            disabled={
+                              workflowMutation !== null || workflows.length <= 1
+                            }
+                            onClick={() => {
+                              setWorkflowLibraryMessage(null);
+                              setPendingWorkflowDelete(item.id);
+                            }}
+                          >
+                            {isDeleting ? (
+                              <Loader2
+                                className="studio-spin"
+                                aria-hidden="true"
+                              />
+                            ) : (
+                              <Trash2 aria-hidden="true" />
+                            )}
+                          </button>
+                        </div>
+                        {confirmingDelete ? (
+                          <div className="studio-library-confirm" role="alert">
+                            <p>
+                              删除「{item.name}
+                              」？它会从列表和使用端隐藏，历史记录仍保留。
+                            </p>
+                            <div>
+                              <button
+                                type="button"
+                                disabled={isDeleting}
+                                onClick={() => setPendingWorkflowDelete(null)}
+                              >
+                                取消
+                              </button>
+                              <button
+                                type="button"
+                                className="is-danger"
+                                disabled={isDeleting}
+                                onClick={() =>
+                                  void deleteWorkflowFromLibrary(item.id)
+                                }
+                              >
+                                {isDeleting ? '正在删除' : '确认删除'}
+                              </button>
+                            </div>
+                          </div>
+                        ) : null}
+                      </li>
+                    );
+                  })}
+                </ul>
+              ) : (
+                <div className="studio-library-empty">
+                  <Search aria-hidden="true" />
+                  <strong>没有匹配的工作流</strong>
+                  <span>换一个名称或用途关键词</span>
+                </div>
+              )}
+            </div>
+
+            <footer className="studio-library-foot">
+              <span
+                className={adminAuthorized ? 'is-authorized' : undefined}
+                aria-hidden="true"
+              />
+              {adminAuthorized
+                ? '可以新建、保存与删除；删除不会清空历史记录。'
+                : '编辑可先保存在浏览器；新建和删除需要管理员令牌。'}
+            </footer>
+          </dialog>
+        </>
+      ) : null}
+
       {creatorAgentOpen ? (
         <>
           <button
@@ -3792,7 +4499,12 @@ function StudioSurface() {
                   <span>辅助 Agent 的模型服务</span>
                   <select
                     value={creatorAgentConfig.provider}
-                    onChange={(event) =>
+                    onChange={(event) => {
+                      setCreatorDiscoveredModels([]);
+                      setCreatorModelDiscovery({
+                        status: 'idle',
+                        message: '',
+                      });
                       setCreatorAgentConfig((current) => {
                         const next = providerDefaults(event.target.value);
                         return next
@@ -3801,10 +4513,11 @@ function StudioSurface() {
                               provider: next.id,
                               baseUrl: next.baseUrl,
                               model: next.model,
+                              reasoningEffort: 'auto',
                             }
                           : current;
-                      })
-                    }
+                      });
+                    }}
                   >
                     {providerOptions().map((option) => (
                       <option key={option.id} value={option.id}>
@@ -3829,19 +4542,24 @@ function StudioSurface() {
                         creatorAgentProvider?.keyHint ??
                         '仅保留到关闭当前标签页'
                       }
-                      onChange={(event) =>
+                      onChange={(event) => {
+                        setCreatorDiscoveredModels([]);
+                        setCreatorModelDiscovery({
+                          status: 'idle',
+                          message: '',
+                        });
                         setCreatorAgentConfig((current) => ({
                           ...current,
                           apiKey: event.target.value,
-                        }))
-                      }
+                        }));
+                      }}
                     />
                   </div>
                 </label>
 
                 <details className="studio-agent-model-settings">
                   <summary>
-                    <ServerCog /> 高级 · 端点和模型名
+                    <ServerCog /> 高级 · 端点、模型与推理
                     <span>
                       {providerOptions().find(
                         (item) => item.id === creatorAgentConfig.provider,
@@ -3860,12 +4578,17 @@ function StudioSurface() {
                             (item) => item.id === creatorAgentConfig.provider,
                           )?.defaultBaseUrl || 'https://你的网关/v1'
                         }
-                        onChange={(event) =>
+                        onChange={(event) => {
+                          setCreatorDiscoveredModels([]);
+                          setCreatorModelDiscovery({
+                            status: 'idle',
+                            message: '',
+                          });
                           setCreatorAgentConfig((current) => ({
                             ...current,
                             baseUrl: event.target.value,
-                          }))
-                        }
+                          }));
+                        }}
                       />
                     </label>
                     <label>
@@ -3881,16 +4604,72 @@ function StudioSurface() {
                         }
                       />
                       <datalist id="studio-agent-model-list">
-                        {(
-                          providerOptions().find(
-                            (item) => item.id === creatorAgentConfig.provider,
-                          )?.models ?? []
-                        ).map((model) => (
+                        {creatorSelectableModels.map((model) => (
                           <option key={model} value={model}>
                             {model}
                           </option>
                         ))}
                       </datalist>
+                    </label>
+                    <button
+                      type="button"
+                      className="studio-agent-model-discover"
+                      disabled={
+                        creatorModelDiscovery.status === 'loading' ||
+                        (creatorAgentKeyRequired &&
+                          !creatorAgentConfig.apiKey.trim()) ||
+                        !creatorAgentConfig.baseUrl.trim()
+                      }
+                      onClick={() => void discoverCreatorModels()}
+                    >
+                      <RefreshCcw
+                        className={
+                          creatorModelDiscovery.status === 'loading'
+                            ? 'is-spinning'
+                            : undefined
+                        }
+                      />
+                      {creatorModelDiscovery.status === 'loading'
+                        ? '读取中…'
+                        : '识别 API 模型'}
+                    </button>
+                    {creatorModelDiscovery.message ? (
+                      <output
+                        className={`studio-agent-model-status is-${creatorModelDiscovery.status}`}
+                        aria-live="polite"
+                      >
+                        {creatorModelDiscovery.message}
+                      </output>
+                    ) : null}
+                    <label>
+                      <span>推理强度</span>
+                      <select
+                        value={
+                          creatorAgentProvider?.reasoningMode === 'model-only'
+                            ? 'auto'
+                            : creatorAgentConfig.reasoningEffort
+                        }
+                        disabled={
+                          creatorAgentProvider?.reasoningMode === 'model-only'
+                        }
+                        onChange={(event) => {
+                          const value = event.target.value;
+                          if (!isLlmReasoningEffort(value)) return;
+                          setCreatorAgentConfig((current) => ({
+                            ...current,
+                            reasoningEffort: value,
+                          }));
+                        }}
+                      >
+                        <option value="auto">自动（API 默认）</option>
+                        <option value="low">低 · 更快</option>
+                        <option value="medium">中 · 均衡</option>
+                        <option value="high">高 · 更深入</option>
+                      </select>
+                      <small>
+                        {creatorAgentProvider?.reasoningNote ??
+                          '仅在该 API 支持时生效。'}
+                      </small>
                     </label>
                   </div>
                 </details>
@@ -4155,7 +4934,7 @@ function StudioSurface() {
         </>
       ) : null}
 
-      <footer className="studio-statusbar" inert={creatorAgentOpen}>
+      <footer className="studio-statusbar" inert={studioOverlayOpen}>
         <span>
           <i className={`service-${serviceState}`} />
           {graphPersistence === 'server'

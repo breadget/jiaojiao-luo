@@ -24,6 +24,7 @@ import type {
   WorkflowGraphV1,
 } from '@/lib/workflow-graph/types';
 import { hasErrors, validateGraph } from '@/lib/workflow-graph/validate';
+import { bindingGuardCode, bindingParameters, RUNTIME_SOURCE } from './runtime-gate';
 import type {
   AdapterIssue,
   CompileOptions,
@@ -36,7 +37,7 @@ import type {
 } from './types';
 
 export const ADAPTER_ID = 'n8n-v1';
-export const ADAPTER_VERSION = '1.1.0';
+export const ADAPTER_VERSION = '1.2.1';
 
 const HTTP_METHODS = ['GET', 'POST', 'PUT', 'PATCH', 'DELETE'];
 
@@ -119,19 +120,23 @@ function inputNormalizerCode(workflowId: string): string {
     "const body = item.body && typeof item.body === 'object' && !Array.isArray(item.body) ? item.body : item;",
     "const headers = item.headers && typeof item.headers === 'object' ? item.headers : {};",
     "const context = body.context && typeof body.context === 'object' && !Array.isArray(body.context) ? body.context : {};",
+    "const input = context.input && typeof context.input === 'object' && !Array.isArray(context.input) ? context.input : {};",
     "const requestId = typeof body.requestId === 'string' && body.requestId ? body.requestId : (headers['x-urtoris-request-id'] || null);",
     "const sessionId = typeof body.sessionId === 'string' && body.sessionId ? body.sessionId : (headers['x-urtoris-session-id'] || null);",
-    "const question = body.question !== undefined ? body.question : (body.message !== undefined ? body.message : '');",
-    'return [{ json: Object.assign({}, body, {',
-    "  workflowId: typeof body.workflowId === 'string' && body.workflowId ? body.workflowId : " +
+    "const question = body.question ?? input.question ?? body.message ?? input.message ?? '';",
+    'if (typeof requestId !== "string" || !requestId.trim() || requestId.length > 80 || requestId.trim().toLowerCase() === "unknown") throw new Error("VALIDATION_ERROR: requestId required");',
+    'if (typeof sessionId !== "string" || !sessionId.trim() || sessionId.length > 80) throw new Error("VALIDATION_ERROR: sessionId required");',
+    'if (body.workflowId && body.workflowId !== ' + JSON.stringify(workflowId) + ') throw new Error("VALIDATION_ERROR: workflowId mismatch");',
+    'return [{ json: { ...input, ...body,',
+    '  workflowId: ' +
       JSON.stringify(workflowId) +
       ',',
-    '  requestId, sessionId, question,',
-    '  channel: body.channel !== undefined ? body.channel : (context.channel ?? null),',
-    '  urgency: body.urgency !== undefined ? body.urgency : (context.urgency ?? null),',
+    '  requestId: requestId.trim(), sessionId: sessionId.trim(), question,',
+    '  channel: body.channel !== undefined ? body.channel : (context.channel ?? input.channel ?? null),',
+    '  urgency: body.urgency !== undefined ? body.urgency : (context.urgency ?? input.urgency ?? null),',
     '  __urtorisStartedAt: Date.now(),',
     '  __urtorisExecutionId: $execution && $execution.id != null ? String($execution.id) : null',
-    '}) }];',
+    '} }];',
   ].join('\n');
 }
 
@@ -139,11 +144,14 @@ function outputEnvelopeCode(input: {
   workflowId: string;
   triggerDataName: string;
   outputNode: WorkflowGraphNode;
-  mode: 'llm' | 'rules';
+  agentNames: string[];
+  rulesAgentNames: string[];
 }): string {
   return [
     '// Urtoris Adapter v1.1 输出归一：所有分支都返回 urtoris.v1 信封。',
     'const source = $input.first().json || {};',
+    'const llmExecuted = ' + JSON.stringify(input.agentNames) + '.some(name => $(name).isExecuted);',
+    'const rulesDegraded = ' + JSON.stringify(input.rulesAgentNames) + '.some(name => $(name).isExecuted);',
     "const root = $('" + input.triggerDataName + "').first().json || {};",
     'let data = source;',
     "if (typeof source.output === 'string') {",
@@ -158,7 +166,7 @@ function outputEnvelopeCode(input: {
     "  requestId: typeof root.requestId === 'string' && root.requestId ? root.requestId : 'unknown',",
     "  engine: 'n8n',",
     '  workflow: ' + JSON.stringify(input.workflowId) + ',',
-    '  mode: ' + JSON.stringify(input.mode) + ', degraded: false,',
+    "  mode: llmExecuted ? 'llm' : 'rules', degraded: rulesDegraded,",
     '  data: Object.assign({}, data, {',
     '    outputNodeId: ' + JSON.stringify(input.outputNode.id) + ',',
     '    outputNodeName: ' + JSON.stringify(input.outputNode.name),
@@ -266,7 +274,7 @@ const NODE_MAPPINGS: Partial<Record<WorkflowGraphNode['type'], NodeMapping>> = {
         asString(node.config.instructions) ||
         '理解请求，必要时调用工具，并返回结构化结果。';
       // v3.x：text = 用户提示词，systemMessage 才是系统指令（v2 的语义不同）。
-      const prompt = asString(node.config.prompt) || '$json.message';
+      const prompt = asString(node.config.prompt) || '$json.question';
       const maxIterations = asPositiveInt(node.config.maxIterations, 10, 50);
       const fallbackPolicy = asString(node.config.fallbackPolicy) || 'error';
       if (fallbackPolicy !== 'error' && fallbackPolicy !== 'rules') {
@@ -284,7 +292,7 @@ const NODE_MAPPINGS: Partial<Record<WorkflowGraphNode['type'], NodeMapping>> = {
           ? { nodeFields: { onError: 'stopWorkflow' as const } }
           : {
               warnings: [
-                'fallbackPolicy=rules 尚未实现对应的 n8n 规则备援；节点失败仍会停止工作流。',
+                '规则备援只在 credentialRef=none 时启用；已配置模型的鉴权、网络或格式失败仍会停止工作流。',
               ],
             }),
       };
@@ -296,7 +304,7 @@ const NODE_MAPPINGS: Partial<Record<WorkflowGraphNode['type'], NodeMapping>> = {
     // OpenAI 兼容端点，Responses API 不保证支持，所以显式关掉。
     typeVersion: 1.3,
     role: 'model',
-    allowedConfig: ['provider', 'model', 'baseUrl'],
+    allowedConfig: ['provider', 'model', 'baseUrl', 'credentialRef'],
     ignoredConfig: ['allowBringYourOwnKey'],
     build: ({ node }) => {
       const rawProvider = asString(node.config.provider) || 'openai-compatible';
@@ -330,9 +338,9 @@ const NODE_MAPPINGS: Partial<Record<WorkflowGraphNode['type'], NodeMapping>> = {
           responsesApiEnabled: false,
           options: baseUrl ? { baseURL: baseUrl } : {},
         },
-        credentialRefs: ['openAiApi'],
+        credentialRefs: node.config.credentialRef === 'none' ? [] : [asString(node.config.credentialRef) || 'openAiApi'],
         warnings: [
-          'Chat Model 凭证由运维挂载：产物不含 Key，导入克隆环境后需绑定 openAiApi 凭证。',
+          node.config.credentialRef === 'none' ? '模型明确未配置；规则路径不调用模型或 Memory。' : 'Chat Model 凭证由运维按 credentialRef 挂载；产物不含 Key。',
           `模型服务：${provider.label}${baseUrl ? `（Base URL: ${baseUrl}）` : ''}；换服务商只需改 Graph 里的 provider / model。`,
         ],
       };
@@ -546,7 +554,21 @@ export async function compileGraphToN8n(
     entryNode?.type === 'trigger'
       ? externalNodeName(entryNode.id, 'input')
       : null;
+  if (graph.entryNodeIds.length !== 1 || entryNode?.type !== 'trigger' ||
+      graph.nodes.filter((node) => node.type === 'trigger').length !== 1 ||
+      graph.nodes.some((node) => node.disabled)) {
+    issues.push({ level: 'error', message: 'Runtime Adapter requires one enabled Webhook entry and no disabled nodes (binding cannot be bypassed).' });
+  }
   const nodes: N8nNode[] = [];
+  // Explicit no-key configuration is part of the immutable Graph, never inferred
+  // from a provider error. Missing mounts for a declared reference still fail.
+  const noModelAgents = new Set(graph.nodes.filter((node) => node.type === 'aiAgent' &&
+    graph.edges.some((edge) => edge.kind === 'model' && edge.source.nodeId === node.id &&
+      graph.nodes.find((candidate) => candidate.id === edge.target.nodeId)?.config.credentialRef === 'none')).map((node) => node.id));
+  for (const node of graph.nodes.filter((node) => noModelAgents.has(node.id))) {
+    if (node.config.fallbackPolicy !== 'rules') issues.push({ level: 'error', nodeId: node.id,
+      message: 'credentialRef=none requires explicit fallbackPolicy=rules; an unconfigured model cannot be reported as LLM success.' });
+  }
   const bindings: CompiledNodeBinding[] = [];
   const primaryByInternal = new Map<string, string>();
   const inputByInternal = new Map<string, string>();
@@ -585,6 +607,7 @@ export async function compileGraphToN8n(
       name: externalName,
       type: input.type,
       typeVersion: input.typeVersion,
+      ...(input.type === 'n8n-nodes-base.webhook' ? { webhookId: externalId } : {}),
       position: input.position,
       notes: input.notes.slice(0, 240),
       ...(input.disabled ? { disabled: true } : {}),
@@ -594,7 +617,11 @@ export async function compileGraphToN8n(
   };
 
   for (const node of graph.nodes) {
-    const mapping = NODE_MAPPINGS[node.type];
+    const mapping: NodeMapping | undefined = noModelAgents.has(node.id) ? {
+      ...NODE_MAPPINGS.aiAgent!, type: 'n8n-nodes-base.code', typeVersion: 2,
+      build: () => ({ parameters: { mode: 'runOnceForAllItems', language: 'javaScript',
+        jsCode: 'return [{ json: { message: "未配置模型，已按规则接收请求。", reason: "LLM_NOT_CONFIGURED", question: $input.first().json.question } }];' } }),
+    } : NODE_MAPPINGS[node.type];
     if (!mapping) continue;
 
     const result = mapping.build({
@@ -663,7 +690,28 @@ export async function compileGraphToN8n(
         notes: `${node.name} · 展平 Webhook body，建立稳定的输入字段。`,
         disabled: node.disabled,
       });
-      outputByInternal.set(node.id, normalizedName);
+      credentialRefs.add('urtorisEventsHeaderAuth');
+      const bindName = await pushCompiledNode({
+        internalNode: node, role: 'execution-bound',
+        type: 'n8n-nodes-base.httpRequest', typeVersion: 4.2,
+        parameters: bindingParameters({ workflowId: options.workflowId, version: options.version, triggerName: externalName }),
+        position: [Math.round(node.position.x + 440), Math.round(node.position.y + 150)],
+        notes: 'credentialRef: urtorisEventsHeaderAuth; clone only; synchronous execution.bound barrier.',
+        nodeFields: { onError: 'stopWorkflow' },
+      });
+      const guardName = await pushCompiledNode({
+        internalNode: node, role: 'binding-guard',
+        type: 'n8n-nodes-base.code', typeVersion: 2,
+        parameters: { mode: 'runOnceForAllItems', language: 'javaScript', jsCode: bindingGuardCode(normalizedName) },
+        position: [Math.round(node.position.x + 660), Math.round(node.position.y + 150)],
+        notes: 'Only HTTP 200 and ok=true, bound=true permit business execution.',
+        nodeFields: { onError: 'stopWorkflow' },
+      });
+      outputByInternal.set(node.id, guardName);
+      adapterConnections.push(
+        { owner: normalizedName, target: bindName, type: 'main', outputIndex: 0 },
+        { owner: bindName, target: guardName, type: 'main', outputIndex: 0 },
+      );
       adapterConnections.push({
         owner: externalName,
         target: normalizedName,
@@ -685,9 +733,8 @@ export async function compileGraphToN8n(
             workflowId: options.workflowId,
             triggerDataName,
             outputNode: node,
-            mode: graph.nodes.some((candidate) => candidate.type === 'aiAgent')
-              ? 'llm'
-              : 'rules',
+            agentNames: graph.nodes.filter((candidate) => candidate.type === 'aiAgent' && !noModelAgents.has(candidate.id)).map((candidate) => externalNodeName(candidate.id, 'primary')),
+            rulesAgentNames: [...noModelAgents].map((id) => externalNodeName(id, 'primary')),
           }),
         },
         position: [
@@ -708,7 +755,7 @@ export async function compileGraphToN8n(
   }
 
   const connections = buildConnections(
-    graph,
+    { ...graph, edges: graph.edges.filter((edge) => !RESOURCE_CONNECTIONS[edge.kind] || !noModelAgents.has(edge.source.nodeId)) },
     {
       primaryByInternal,
       inputByInternal,
@@ -740,7 +787,7 @@ export async function compileGraphToN8n(
     connections,
     // 环境相关的绑定（errorWorkflow、凭证）刻意不写进产物：
     // 它们属于部署环境，不属于这份不可变快照。
-    settings: { executionOrder: 'v1' },
+    settings: { executionOrder: 'v1', saveDataSuccessExecution: 'all', saveDataErrorExecution: 'all' },
     active: false,
     meta: {
       urtoris: {
@@ -750,6 +797,11 @@ export async function compileGraphToN8n(
         version: options.version,
         graphHash,
         webhookPath,
+        eventSource: RUNTIME_SOURCE,
+        runtimeCanaryOnly: true,
+        noModelRoutes: [...noModelAgents].map((id) => ({ agentName: externalNodeName(id, 'primary'),
+          resourceNames: graph.edges.filter((edge) => RESOURCE_CONNECTIONS[edge.kind] && edge.source.nodeId === id)
+            .map((edge) => primaryByInternal.get(edge.target.nodeId)!).sort() })),
       },
     },
   };

@@ -106,7 +106,7 @@ const headers = incoming.headers ?? {{}};
 const requestId = body.requestId ?? headers['x-urtoris-request-id'] ?? null;
 const sessionId = body.sessionId ?? headers['x-urtoris-session-id'] ?? null;
 return [{{ json: {{
-  eventType: 'workflow.started',
+  eventType: 'execution.bound',
   level: 'info',
   message: 'requestId 与 executionId 已在入口绑定',
   requestId,
@@ -134,8 +134,10 @@ return [{ json: incoming }];"""
     post["parameters"]["sendBody"] = True
     post["parameters"]["specifyBody"] = "json"
     post["parameters"]["jsonBody"] = "={{ $json }}"
-    post["onError"] = "continueRegularOutput"
-    post["continueOnFail"] = True
+    # The binding is the safety gate: a non-2xx response from the site must
+    # stop the workflow before any downstream node can run.
+    post.pop("onError", None)
+    post.pop("continueOnFail", None)
     restore = code_node(
         code_template,
         RESTORE_NODE,

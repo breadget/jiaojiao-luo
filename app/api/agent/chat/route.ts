@@ -3,12 +3,26 @@ import {
   buildAgentReply,
   type AgentAnalysis,
 } from '@/lib/server/agent-brain';
+import { isLlmReasoningEffort } from '@/lib/llm/providers';
 import {
   buildWorkflowSystemPrompt,
   callChatModel,
   resolveLlmSelection,
   type ChatMessage,
 } from '@/lib/server/llm';
+import {
+  ConsumerSessionError,
+  consumerSessionErrorResponse,
+  getConsumerSession,
+  getConsumerMessage,
+  type ConsumerSession,
+} from '@/lib/server/consumer-store';
+import { persistChatRunReply } from '@/lib/server/consumer-chat';
+import {
+  composeContextualMessage,
+  loadConversationHistory,
+  type ConversationHistoryOptions,
+} from '@/lib/server/conversation-history';
 import { callN8nWorkflow } from '@/lib/server/n8n';
 import { buildRequest, extractMessage } from '@/lib/server/protocol';
 import {
@@ -152,12 +166,99 @@ export async function POST(request: Request) {
   const message = body.message.trim();
   const analysis = analyzeMessage(message);
 
+  // 在浏览器会话授权后读取完整记录；读取失败不能退化成只发送当前一句。
+  const consumerSessionId = readOptionalString(body.consumerSessionId, 80);
+  const agentMessageId = readOptionalString(body.agentMessageId, 80);
+  if (agentMessageId && !consumerSessionId) {
+    return Response.json({ error: '回复消息缺少所属对话。' }, { status: 400 });
+  }
+  let consumerSession: ConsumerSession | null = null;
+  const historyOptions: ConversationHistoryOptions = {
+    currentMessageId: readOptionalString(body.userMessageId, 80),
+    currentText: message,
+  };
+  let conversationHistory: ChatMessage[] = [];
+  try {
+    if (consumerSessionId) {
+      consumerSession = await getConsumerSession(
+        request,
+        workflow.id,
+        consumerSessionId,
+      );
+      if (!consumerSession) {
+        throw new ConsumerSessionError(
+          '这条对话不存在或不属于当前浏览器。',
+          404,
+        );
+      }
+      if (agentMessageId) {
+        const agentMessage = await getConsumerMessage(
+          consumerSession.id,
+          agentMessageId,
+        );
+        if (!agentMessage || agentMessage.role !== 'agent') {
+          throw new ConsumerSessionError('回复消息未保存在当前对话中。', 409);
+        }
+        const linkedRequestId = agentMessage.metadata.chatRequestId;
+        if (linkedRequestId && linkedRequestId !== body.requestId) {
+          throw new ConsumerSessionError('回复消息与当前请求不匹配。', 409);
+        }
+      }
+      conversationHistory = await loadConversationHistory(
+        consumerSession.id,
+        historyOptions,
+      );
+    }
+  } catch (cause) {
+    return consumerSessionErrorResponse(cause);
+  }
+  const chatResponse = async (
+    payload: Record<string, unknown>,
+    status = 200,
+  ) => {
+    if (consumerSession && agentMessageId && payload.run) {
+      await persistChatRunReply(
+        consumerSession,
+        agentMessageId,
+        payload.run as WorkflowRun,
+        {
+          intent: analysis.intent,
+          priority: analysis.priority,
+        },
+      );
+    }
+    return Response.json(payload, { status });
+  };
+  const chatReplayResponse = async (run: WorkflowRun) => {
+    const response = replayResponse(run, analysis);
+    return chatResponse(
+      (await response.json()) as Record<string, unknown>,
+      response.status,
+    );
+  };
+  // n8n 侧的提示词节点只读 message（归一后是 question），看不到 context，
+  // 也不一定挂了 Memory 节点：把历史拼进 message，任何绑定的工作流都能接上。
+  // 站点自己的运行记录仍然保存用户原话（见下面的 createN8nRun）。
+  const n8nMessage = composeContextualMessage(message, conversationHistory);
+
   // 使用端在界面上自带的模型配置；服务端只透传，不落盘。
   // provider 决定用哪家 API（以及默认端点/默认模型），Key 永远是用户自带的。
   const apiKey = readOptionalString(body.apiKey, 400);
   const provider = readOptionalString(body.provider, 40);
   const requestedBaseUrl = readOptionalString(body.baseUrl, 400);
   const requestedModel = readOptionalString(body.model, 120);
+  const reasoningEffort =
+    body.reasoningEffort === undefined
+      ? 'auto'
+      : isLlmReasoningEffort(body.reasoningEffort)
+        ? body.reasoningEffort
+        : null;
+  if (!reasoningEffort) {
+    return Response.json(
+      { error: '推理强度只能是 auto、low、medium 或 high。' },
+      { status: 400 },
+    );
+  }
   const selection = resolveLlmSelection({
     provider,
     baseUrl: requestedBaseUrl,
@@ -190,7 +291,7 @@ export async function POST(request: Request) {
       return Response.json({ error: decision.message }, { status: 409 });
     }
     if (decision.kind === 'replay') {
-      return replayResponse(decision.run, analysis);
+      return chatReplayResponse(decision.run);
     }
 
     let claimedRunId: string | null = null;
@@ -210,7 +311,7 @@ export async function POST(request: Request) {
             { status: 409 },
           );
         }
-        return replayResponse(settled, analysis);
+        return chatReplayResponse(settled);
       }
       claimedRunId = claim.runId;
     }
@@ -218,12 +319,20 @@ export async function POST(request: Request) {
     const startedAt = Date.now();
     const envelopeRequest = buildRequest({
       workflowId: workflow.id,
-      message,
+      message: n8nMessage ?? message,
       requestId: incomingRequestId ?? null,
       sessionId: incomingSessionId ?? null,
       userId: readOptionalString(body.userId, 80) ?? null,
-      llm: apiKey ? { apiKey, baseUrl, model } : null,
-      context: { intentHint: analysis.intent },
+      llm: apiKey ? { apiKey, baseUrl, model, reasoningEffort } : null,
+      context: {
+        intentHint: analysis.intent,
+        // 原始输入始终单独保留一份：工作流需要干净文本时用它，
+        // 运行记录和页面显示的也仍然是这句原话。
+        currentMessage: message,
+        // n8n 侧的 Memory 只覆盖它自己跑过的轮次；把站点已落库的历史一并带上，
+        // 让绑定 n8n 的工作流也能看到同一个会话的前文。
+        ...(conversationHistory.length ? { conversationHistory } : {}),
+      },
       source: 'urtoris-web',
       workflowVersion: workflow.version,
       workflowName: workflow.name,
@@ -253,7 +362,7 @@ export async function POST(request: Request) {
       if (!envelope.success) {
         // 失败必须如实暴露：带上错误码、requestId 和这次运行的记录。
         const code = envelope.error?.code ?? 'INTERNAL_ERROR';
-        return Response.json(
+        return chatResponse(
           {
             error: `[${code}] ${envelope.error?.message ?? 'n8n 执行失败'}`,
             errorCode: code,
@@ -265,7 +374,7 @@ export async function POST(request: Request) {
             run,
             envelope,
           },
-          { status: 502 },
+          502,
         );
       }
 
@@ -273,7 +382,7 @@ export async function POST(request: Request) {
         extractMessage(envelope.data) ??
         `「${workflow.name}」已在 n8n 上执行完成。`;
 
-      return Response.json({
+      return chatResponse({
         reply,
         intent: analysis.intent,
         priority: analysis.priority,
@@ -310,7 +419,7 @@ export async function POST(request: Request) {
     return Response.json({ error: directDecision.message }, { status: 409 });
   }
   if (directDecision.kind === 'replay') {
-    return replayResponse(directDecision.run, analysis);
+    return chatReplayResponse(directDecision.run);
   }
 
   let claimedRunId: string | null = null;
@@ -330,7 +439,7 @@ export async function POST(request: Request) {
           { status: 409 },
         );
       }
-      return replayResponse(settled, analysis);
+      return chatReplayResponse(settled);
     }
     claimedRunId = claim.runId;
   }
@@ -357,7 +466,13 @@ export async function POST(request: Request) {
     const shouldCallModel = Boolean(apiKey) || !selection.selection.keyRequired;
     if (shouldCallModel) {
       const history: ChatMessage[] = [
-        { role: 'system', content: buildWorkflowSystemPrompt(workflow) },
+        {
+          role: 'system',
+          content: buildWorkflowSystemPrompt(workflow, {
+            hasConversationHistory: conversationHistory.length > 0,
+          }),
+        },
+        ...conversationHistory,
         { role: 'user', content: message },
       ];
       const result = await callChatModel({
@@ -365,6 +480,7 @@ export async function POST(request: Request) {
         provider: selection.selection.providerId,
         baseUrl,
         model,
+        reasoningEffort,
         messages: history,
       });
 
@@ -386,7 +502,7 @@ export async function POST(request: Request) {
             degraded: false,
           },
         });
-        return Response.json(
+        return chatResponse(
           {
             error: result.error,
             errorCode: result.code,
@@ -399,7 +515,7 @@ export async function POST(request: Request) {
             sessionId: directRequest.sessionId,
             run,
           },
-          { status: 502 },
+          502,
         );
       }
 
@@ -436,7 +552,7 @@ export async function POST(request: Request) {
       },
     );
 
-    return Response.json({
+    return chatResponse({
       reply,
       intent: analysis.intent,
       priority,

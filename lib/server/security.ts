@@ -1,9 +1,6 @@
 import { env } from 'cloudflare:workers';
 
-const rateBuckets = new Map<
-  string,
-  { startedAt: number; count: number }
->();
+const rateBuckets = new Map<string, { startedAt: number; count: number }>();
 
 export const JSON_BODY_LIMIT_BYTES = 32 * 1024;
 export const ADMIN_JSON_BODY_LIMIT_BYTES = 64 * 1024;
@@ -21,10 +18,13 @@ function jsonError(
 ): Response {
   const responseHeaders = new Headers(headers);
   responseHeaders.set('Cache-Control', 'no-store');
-  return Response.json({ error: message }, {
-    status,
-    headers: responseHeaders,
-  });
+  return Response.json(
+    { error: message },
+    {
+      status,
+      headers: responseHeaders,
+    },
+  );
 }
 
 function requestAddress(request: Request): string {
@@ -86,7 +86,10 @@ export async function readJsonObject(
     advertisedLength > maxBytes
   ) {
     return {
-      response: jsonError(`请求内容不能超过 ${Math.round(maxBytes / 1024)} KB。`, 413),
+      response: jsonError(
+        `请求内容不能超过 ${Math.round(maxBytes / 1024)} KB。`,
+        413,
+      ),
     };
   }
 
@@ -131,7 +134,10 @@ export async function readJsonObject(
   }
   if (bytes.byteLength > maxBytes) {
     return {
-      response: jsonError(`请求内容不能超过 ${Math.round(maxBytes / 1024)} KB。`, 413),
+      response: jsonError(
+        `请求内容不能超过 ${Math.round(maxBytes / 1024)} KB。`,
+        413,
+      ),
     };
   }
 
@@ -228,13 +234,22 @@ export function isPrivateHostname(hostname: string): boolean {
   if (hostname.includes(':')) {
     // IPv6 唯一本地地址 fc00::/7
     const prefix = hostname.slice(0, 2);
-    return prefix === 'fc' || prefix === 'fd' || prefix === 'fe8' || prefix === 'fe9' || prefix === 'fea' || prefix === 'feb';
+    return (
+      prefix === 'fc' ||
+      prefix === 'fd' ||
+      prefix === 'fe8' ||
+      prefix === 'fe9' ||
+      prefix === 'fea' ||
+      prefix === 'feb'
+    );
   }
 
   const parts = hostname.split('.');
   if (parts.length !== 4) return false;
   const octets = parts.map((part) => Number(part));
-  if (octets.some((value) => !Number.isInteger(value) || value < 0 || value > 255)) {
+  if (
+    octets.some((value) => !Number.isInteger(value) || value < 0 || value > 255)
+  ) {
     return false;
   }
   const [a, b] = octets;
@@ -338,7 +353,10 @@ export function enforceRequestPolicy(request: Request): Response | null {
     request.headers.get('Host')?.trim();
   const forwardedProtocol =
     request.headers.get('X-Forwarded-Proto')?.split(',')[0]?.trim() || '';
-  if (forwardedHost && (forwardedProtocol === 'http' || forwardedProtocol === 'https')) {
+  if (
+    forwardedHost &&
+    (forwardedProtocol === 'http' || forwardedProtocol === 'https')
+  ) {
     try {
       allowedOrigins.add(
         new URL(`${forwardedProtocol}://${forwardedHost}`).origin.toLowerCase(),
@@ -354,7 +372,8 @@ export function enforceRequestPolicy(request: Request): Response | null {
     try {
       const configuredUrl = new URL(value);
       if (
-        (configuredUrl.protocol === 'http:' || configuredUrl.protocol === 'https:') &&
+        (configuredUrl.protocol === 'http:' ||
+          configuredUrl.protocol === 'https:') &&
         configuredUrl.pathname === '/' &&
         !configuredUrl.search &&
         !configuredUrl.hash &&
@@ -379,7 +398,10 @@ export function enforceRequestPolicy(request: Request): Response | null {
  * 需要使用公开 API 令牌。这样既保留工作台调用能力，也不会把 POST
  * 当成一个可被任意跨站表单触发的匿名执行端点。
  */
-export function enforceExecutionAccess(request: Request): Response | null {
+export function enforceExecutionAccess(
+  request: Request,
+  options: { allowConsumerClientMarker?: boolean } = {},
+): Response | null {
   const policy = enforceRequestPolicy(request);
   if (policy) return policy;
 
@@ -388,6 +410,17 @@ export function enforceExecutionAccess(request: Request): Response | null {
     request.headers.get('Origin')?.trim() ||
     fetchSite === 'same-origin' ||
     fetchSite === 'same-site'
+  ) {
+    return null;
+  }
+
+  // Some embedded browsers omit both Origin and Sec-Fetch-Site on same-origin
+  // GETs. The consumer UI opts into this narrow marker via a custom header;
+  // because it is non-simple, a cross-origin browser cannot send it without a
+  // preflight that this endpoint does not permit. Keep it opt-in per route.
+  if (
+    options.allowConsumerClientMarker &&
+    request.headers.get('X-Urtoris-Consumer-Client') === '1'
   ) {
     return null;
   }

@@ -120,6 +120,7 @@ describe('Workflow creator Agent 提案边界', () => {
     assert.deepEqual(compiled.requiredCredentialRefs, [
       'headerAuth',
       'openAiApi',
+      'urtorisEventsHeaderAuth',
     ]);
   });
 

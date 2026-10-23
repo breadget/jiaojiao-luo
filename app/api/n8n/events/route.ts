@@ -1,4 +1,6 @@
 import { env } from 'cloudflare:workers';
+import { acceptRuntimeEvent, getRuntimeStream } from '@/lib/server/graph-runtime-events';
+import { RUNTIME_SOURCE } from '@/lib/workflow-graph/adapter/runtime-gate';
 
 import {
   EXECUTION_BOUND_EVENT,
@@ -138,6 +140,13 @@ export async function POST(request: Request) {
   }
 
   const stored: string[] = [];
+  if (rawEvents.some((raw) => raw && typeof raw === 'object' && (raw as Record<string, unknown>).source === RUNTIME_SOURCE)) {
+    if ((env as unknown as Record<string, unknown>).URTORIS_GRAPH_RUNTIME_CANARY !== '1') {
+      return Response.json({ ok: false, code: 'RUNTIME_CANARY_DISABLED' }, { status: 503 });
+    }
+    if (rawEvents.length !== 1) return Response.json({ ok: false, code: 'RUNTIME_SINGLE_EVENT_REQUIRED' }, { status: 400 });
+    return acceptRuntimeEvent(rawEvents[0] as Record<string, unknown>);
+  }
   for (const raw of rawEvents) {
     if (!raw || typeof raw !== 'object') continue;
     const record = raw as Record<string, unknown>;
@@ -145,6 +154,10 @@ export async function POST(request: Request) {
     const workflowId = readString(record.workflowId, 120);
     const workflow = readString(record.workflow ?? workflowId, 120);
     const executionId = readString(record.executionId, 80);
+    if (executionId && (env as unknown as Record<string, unknown>).URTORIS_GRAPH_RUNTIME_CANARY === '1' &&
+        await getRuntimeStream(executionId)) {
+      return Response.json({ ok: false, code: 'RUNTIME_SOURCE_REQUIRED' }, { status: 409 });
+    }
     let requestId = readString(record.requestId, 80);
 
     /**
