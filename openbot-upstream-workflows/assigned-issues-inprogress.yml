@@ -1,0 +1,17 @@
+name: Move assigned issues into OpenBot - In progress
+
+on:
+  issues:
+    types: [assigned]
+
+jobs:
+  automate-project-columns:
+    runs-on: ubuntu-latest
+    # Check we are not on a fork
+    if: github.repository == 'ob-f/OpenBot'
+    steps:
+      - uses: alex-page/github-project-automation-plus@v0.3.0
+        with:
+          project: OpenBot
+          column: In progress
+          repo-token: ${{ secrets.GH_TOKEN }}

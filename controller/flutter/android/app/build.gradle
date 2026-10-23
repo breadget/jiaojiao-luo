@@ -1,0 +1,51 @@
+plugins {
+    id "com.android.application"
+    id "org.jetbrains.kotlin.android"
+    id "dev.flutter.flutter-gradle-plugin"
+}
+
+android {
+    namespace "org.openbot.flutter_controller"
+
+    // 1. Updated to match the new plugin requirements
+    compileSdk 36
+
+    // 2. Explicitly setting the NDK version requested by nsd_android
+    ndkVersion = "28.2.13676358"
+
+    defaultConfig {
+        applicationId "org.openbot.flutter_controller"
+
+        // 3. Changed from 'flutter.minSdkVersion' to 24 to support modern WebRTC/Sensors
+        minSdkVersion 24
+
+        // 4. Updated to match the latest Android standards
+        targetSdk 36
+
+        versionCode flutter.versionCode
+        versionName flutter.versionName
+    }
+
+    buildTypes {
+        release {
+            signingConfig signingConfigs.debug
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+
+    kotlinOptions {
+        jvmTarget = "17"
+    }
+}
+
+flutter {
+    source "../.."
+}
+
+dependencies {
+    // Leave this empty unless adding specific native libraries
+}
