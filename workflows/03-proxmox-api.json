@@ -1,0 +1,264 @@
+{
+  "name": "03 - Proxmox API Gateway (Webhook)",
+  "id": "wf030000-0000-4000-8000-000000000003",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "GET",
+        "path": "proxmox",
+        "responseMode": "onReceived",
+        "options": {}
+      },
+      "id": "f3a20001-0000-4000-8000-000000000001",
+      "name": "Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [-360, 0]
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "You are a Proxmox API assistant. Given an incoming request (mode and payload), decide the correct Proxmox API action.\n\nUse the tools to:\n- Look up the Proxmox API documentation for the requested endpoint.\n- Perform the requested action against the Proxmox server.\n\nOutput a short summary and the resulting HTTP method (GET / POST / DELETE).",
+        "options": {}
+      },
+      "id": "f3a20002-0000-4000-8000-000000000002",
+      "name": "AI Agent",
+      "type": "@n8n/n8n-nodes-langchain.agent",
+      "typeVersion": 2,
+      "position": [-120, 0]
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            { "conditions": { "leftValue": "={{ $json.method || 'GET' }}", "rightValue": "GET", "operator": { "type": "string", "operation": "equals" } } },
+            { "conditions": { "leftValue": "={{ $json.method || 'GET' }}", "rightValue": "POST", "operator": { "type": "string", "operation": "equals" } } },
+            { "conditions": { "leftValue": "={{ $json.method || 'GET' }}", "rightValue": "DELETE", "operator": { "type": "string", "operation": "equals" } } }
+          ]
+        },
+        "options": {}
+      },
+      "id": "f3a20003-0000-4000-8000-000000000003",
+      "name": "Switch",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3,
+      "position": [200, 0]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $json.url }}",
+        "options": {}
+      },
+      "id": "f3a20004-0000-4000-8000-000000000004",
+      "name": "Get properties",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [520, -300]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Shape the fetched properties into a predictable response.\nreturn { json: { success: true, type: 'properties', data: Object.keys($json).map((k) => ({ key: k, value: $json[k] })) } };\n"
+      },
+      "id": "f3a20005-0000-4000-8000-000000000005",
+      "name": "Structure Response",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [760, -300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $json.url }}",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.body || {}) }}",
+        "options": {}
+      },
+      "id": "f3a20006-0000-4000-8000-000000000006",
+      "name": "Post URL",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [520, -60]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": { "caseSensitive": true, "typeValidation": "loose", "version": 2 },
+          "conditions": [
+            {
+              "id": "del-ok",
+              "leftValue": "={{ $json.confirmed }}",
+              "rightValue": "true",
+              "operator": { "type": "boolean", "operation": "true" }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "f3a20007-0000-4000-8000-000000000007",
+      "name": "Delete/Return",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [520, 180]
+    },
+    {
+      "parameters": {
+        "method": "DELETE",
+        "url": "={{ $json.url }}",
+        "options": {}
+      },
+      "id": "f3a20008-0000-4000-8000-000000000008",
+      "name": "Delete URL",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [760, 60]
+    },
+    {
+      "parameters": {},
+      "id": "f3a20009-0000-4000-8000-000000000009",
+      "name": "Return output",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [760, 300]
+    },
+    {
+      "parameters": {
+        "model": "gemini-2.5-flash",
+        "options": {}
+      },
+      "id": "f3a20001-0000-4000-8000-000000000010",
+      "name": "Google Gemini Chat Model",
+      "type": "@n8n/n8n-nodes-langchain.lmChatGoogleGemini",
+      "typeVersion": 1,
+      "position": [-440, 360]
+    },
+    {
+      "parameters": {
+        "description": "Look up Proxmox API endpoints for the requested resource.",
+        "toolDescription": "Use to resolve the exact Proxmox API endpoint and parameters for an action.",
+        "url": "https://pve.proxmox.com/pve-docs/api-viewer/index.html",
+        "method": "GET",
+        "options": {}
+      },
+      "id": "f3a20001-0000-4000-8000-000000000011",
+      "name": "Proxmox API Documentation",
+      "type": "@n8n/n8n-nodes-langchain.toolHttpRequest",
+      "typeVersion": 1,
+      "position": [-260, 380]
+    },
+    {
+      "parameters": {
+        "description": "Search the Proxmox API wiki.",
+        "toolDescription": "Use to search Proxmox API wiki content.",
+        "url": "https://pve.proxmox.com/wiki",
+        "method": "GET",
+        "options": {}
+      },
+      "id": "f3a20001-0000-4000-8000-000000000012",
+      "name": "Proxmox API Wiki",
+      "type": "@n8n/n8n-nodes-langchain.toolHttpRequest",
+      "typeVersion": 1,
+      "position": [-60, 400]
+    },
+    {
+      "parameters": {
+        "description": "Call the actual Proxmox API server.",
+        "toolDescription": "Use to execute a request against the Proxmox server.",
+        "url": "https://your-proxmox:8006/api2/json/",
+        "method": "POST",
+        "options": {}
+      },
+      "id": "f3a20001-0000-4000-8000-000000000013",
+      "name": "Proxmox",
+      "type": "@n8n/n8n-nodes-langchain.toolHttpRequest",
+      "typeVersion": 1,
+      "position": [140, 420]
+    },
+    {
+      "parameters": {
+        "model": "llama-3.3-70b-versatile",
+        "options": {}
+      },
+      "id": "f3a20001-0000-4000-8000-000000000014",
+      "name": "Groq Chat Model",
+      "type": "@n8n/n8n-nodes-langchain.lmChatGroq",
+      "typeVersion": 1,
+      "position": [260, 620]
+    },
+    {
+      "parameters": {
+        "schemaType": "manual",
+        "specifyOutputSchema": "json",
+        "outputSchema": "{\n  \"type\": \"object\",\n  \"properties\": {\n    \"method\": { \"type\": \"string\", \"enum\": [\"GET\", \"POST\", \"DELETE\"] },\n    \"url\": { \"type\": \"string\" },\n    \"body\": { \"type\": \"object\" },\n    \"summary\": { \"type\": \"string\" }\n  }\n}"
+      },
+      "id": "f3a20001-0000-4000-8000-000000000015",
+      "name": "Structured Output",
+      "type": "@n8n/n8n-nodes-langchain.outputParserStructured",
+      "typeVersion": 1.2,
+      "position": [520, 780]
+    },
+    {
+      "parameters": {
+        "options": {}
+      },
+      "id": "f3a20001-0000-4000-8000-000000000016",
+      "name": "Auto-fixing Output Parser",
+      "type": "@n8n/n8n-nodes-langchain.outputParserAutofixing",
+      "typeVersion": 1,
+      "position": [200, 620]
+    }
+  ],
+  "connections": {
+    "Webhook": {
+      "main": [[{ "node": "AI Agent", "type": "main", "index": 0 }]]
+    },
+    "Google Gemini Chat Model": {
+      "ai_languageModel": [[{ "node": "AI Agent", "type": "ai_languageModel", "index": 0 }]]
+    },
+    "Proxmox API Documentation": {
+      "ai_tool": [[{ "node": "AI Agent", "type": "ai_tool", "index": 0 }]]
+    },
+    "Proxmox API Wiki": {
+      "ai_tool": [[{ "node": "AI Agent", "type": "ai_tool", "index": 0 }]]
+    },
+    "Proxmox": {
+      "ai_tool": [[{ "node": "AI Agent", "type": "ai_tool", "index": 0 }]]
+    },
+    "Auto-fixing Output Parser": {
+      "ai_outputParser": [[{ "node": "AI Agent", "type": "ai_outputParser", "index": 0 }]]
+    },
+    "Groq Chat Model": {
+      "ai_languageModel": [[{ "node": "Auto-fixing Output Parser", "type": "ai_languageModel", "index": 0 }]]
+    },
+    "Structured Output": {
+      "ai_outputParser": [[{ "node": "Auto-fixing Output Parser", "type": "ai_outputParser", "index": 0 }]]
+    },
+    "AI Agent": {
+      "main": [[{ "node": "Switch", "type": "main", "index": 0 }]]
+    },
+    "Switch": {
+      "main": [
+        [{ "node": "Get properties", "type": "main", "index": 0 }],
+        [{ "node": "Post URL", "type": "main", "index": 0 }],
+        [{ "node": "Delete/Return", "type": "main", "index": 0 }]
+      ]
+    },
+    "Get properties": {
+      "main": [[{ "node": "Structure Response", "type": "main", "index": 0 }]]
+    },
+    "Delete/Return": {
+      "main": [
+        [{ "node": "Delete URL", "type": "main", "index": 0 }],
+        [{ "node": "Return output", "type": "main", "index": 0 }]
+      ]
+    }
+  },
+  "active": false,
+  "settings": { "executionOrder": "v1" },
+  "versionId": "a3000000-0000-4000-8000-000000000001",
+  "meta": { "templateCredsSetupCompleted": true },
+  "pinData": {},
+  "tags": []
+}
