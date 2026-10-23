@@ -70,6 +70,7 @@ export const nodeRegistry: Record<StudioNodeType, NodeDefinition> = {
     config: {
       strategy: 'tools',
       instructions: '理解请求，必要时调用工具，并返回结构化结果。',
+      constraints: '',
       /** n8n 表达式体；Adapter 编译时包成 ={{ ... }} 作为 Agent 的用户提示词。 */
       prompt: '$json.message',
       maxIterations: 6,
@@ -80,7 +81,7 @@ export const nodeRegistry: Record<StudioNodeType, NodeDefinition> = {
   llmModel: {
     type: 'llmModel',
     category: 'Resources',
-    label: 'Qwen Model',
+    label: '模型',
     description:
       '可选的模型服务：通义千问 / OpenAI / DeepSeek / Kimi / GLM / Claude / Gemini / 本机 Ollama / 自定义 OpenAI 兼容端点',
     capability: 'model.chat',
@@ -101,6 +102,19 @@ export const nodeRegistry: Record<StudioNodeType, NodeDefinition> = {
     risk: 'low',
     ports: [port('memory.provider', 'Memory', 'memory', 'input', false, 1)],
     config: { provider: 'window', maxTurns: 12 },
+  },
+  courseKnowledge: {
+    type: 'courseKnowledge',
+    category: 'Data',
+    label: '课程资料',
+    description: '从已建立索引的课程资料检索原文、文件名和页码',
+    capability: 'course.retrieve',
+    risk: 'low',
+    ports: [
+      port('main.in', 'Main', 'main', 'input', true, 1),
+      port('main.out', 'Main', 'main', 'output'),
+    ],
+    config: { query: '$json.message' },
   },
   tool: {
     type: 'tool',
@@ -147,15 +161,22 @@ export const nodeRegistry: Record<StudioNodeType, NodeDefinition> = {
   database: {
     type: 'database',
     category: 'Data',
-    label: 'Database',
-    description: '读取或写入受控数据源',
+    label: '本机数据库',
+    description: '连接电脑中的 SQLite 文件，供 AI 只读查询',
     capability: 'database.query',
     risk: 'high',
     ports: [
-      port('main.in', 'Main', 'main', 'input', true, 1),
+      port('tool.provider', 'Database', 'tool', 'input', false, 1),
+      port('main.in', 'Main', 'main', 'input', false, 1),
       port('main.out', 'Main', 'main', 'output'),
     ],
-    config: { operation: 'select' },
+    config: {
+      provider: 'sqlite',
+      location: 'local',
+      filePath: '',
+      operation: 'select',
+      maxRows: 100,
+    },
   },
   transform: {
     type: 'transform',
@@ -245,6 +266,7 @@ export const paletteNodeTypes: StudioNodeType[] = [
   'aiAgent',
   'condition',
   'transform',
+  'courseKnowledge',
   'httpRequest',
   'database',
   'robotAction',

@@ -1,0 +1,46 @@
+{
+  "capturedAt": "2026-09-15T10:24:24+09:00",
+  "host": {
+    "os": "macOS 27.0",
+    "architecture": "arm64",
+    "virtualization": "Colima v0.10.3 / macOS Virtualization.Framework / virtiofs",
+    "lima": "2.2.0",
+    "dockerCli": "29.8.0",
+    "dockerBuildx": "0.37.1",
+    "vm": {
+      "cpuCount": 4,
+      "memoryGiB": 4,
+      "diskGiB": 20
+    }
+  },
+  "image": "urtoris/python-executor:dev",
+  "command": "PYTHON_EXECUTOR_IMAGE=urtoris/python-executor:dev npm run executor:test:docker",
+  "result": {
+    "tests": 11,
+    "passed": 11,
+    "failed": 0,
+    "durationMs": 12319
+  },
+  "gates": [
+    "ordinary Python and real exit code",
+    "real syntax error and stderr",
+    "hard wall-clock timeout",
+    "memory exhaustion classification",
+    "network isolation",
+    "host file isolation",
+    "bounded stdout without deadlock",
+    "validated CSV and PNG artifacts",
+    "controlled input mount",
+    "validated XLSX round trip",
+    "zero labeled containers after terminal state"
+  ],
+  "localSecurityBoundary": {
+    "network": "none",
+    "rootFilesystem": "read-only",
+    "user": "65532:65532",
+    "capabilities": "all dropped",
+    "noNewPrivileges": true,
+    "seccomp": "Docker default",
+    "lsm": "not available in local Colima; production still requires AppArmor or SELinux"
+  }
+}

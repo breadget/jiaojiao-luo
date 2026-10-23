@@ -27,6 +27,7 @@ Urtoris is a paired workflow system: the “创建工作流端” creates and pu
 - Load a published workflow into the Agent and send it messages, receiving a step-by-step reply.
 - Start a run and watch each step move through queued, running, and completed states.
 - Inspect the output and execution log without switching tools.
+- On the owner's local-only site, explicitly opt into a current-user Shell mode for tasks that need the whole Mac rather than the Python sandbox.
 
 ## Positioning
 
@@ -37,12 +38,12 @@ The defining mechanism is the visible handoff between authoring and execution: a
 - A Creator surface for naming multiple workflows, adding/reordering/editing steps, and publishing versions.
 - A “使用工作流端” surface with a workflow loader, an Agent chat panel, run controls, step progress, logs, and final output.
 - Persistent workflow and run records through D1.
-- A safe simulated executor using only prototype step types; no arbitrary shell commands or third-party credentials.
+- A safe simulated executor, an isolated Python executor, and an explicitly selected local-only current-user Shell mode.
 - Synthetic starter content clearly labeled as demonstration data.
 
 ## Out of Scope for This Version
 
-- Public deployment, ICP filing, domain changes, billing, teams, permissions, marketplace distribution, arbitrary code execution, and external integrations.
+- Public or multi-user arbitrary code execution, remote Mac control, automated root escalation, billing, teams, permissions, and marketplace distribution.
 - Production authentication and secrets management.
 
 ## Evidence and Assets

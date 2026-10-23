@@ -1,0 +1,152 @@
+{
+  "capturedAt": "2026-09-15T13:18:11.598Z",
+  "command": "node --import tsx scripts/local-control-gate.ts",
+  "target": "http://127.0.0.1:3020",
+  "scope": "当前 macOS 用户（非 root、非沙箱）",
+  "protocol": "urtoris.local-control.v1",
+  "gates": [
+    {
+      "name": "identity-and-auth",
+      "ok": true,
+      "durationMs": 43,
+      "uid": 501,
+      "platform": "darwin",
+      "shell": "/bin/zsh",
+      "concurrency": 1,
+      "maximumTimeoutSeconds": 86400,
+      "agentStartedAt": "2026-09-15T13:14:43.684Z",
+      "unauthenticatedInfoStatus": 401
+    },
+    {
+      "name": "current-user-shell",
+      "ok": true,
+      "durationMs": 218,
+      "runId": "shell_a5ac174aa432fa8fba0772f63dc4ef3b",
+      "status": "succeeded",
+      "exitCode": 0,
+      "stdoutRedacted": "uid=501 user=<user> host=<host> shell=/bin/zsh cwd=<project-root> git=/usr/bin/git",
+      "matchesAgentIdentity": true,
+      "stderr": "",
+      "shell": "/bin/zsh",
+      "cwdIsProjectRoot": true
+    },
+    {
+      "name": "fast-commands-do-not-stall",
+      "ok": true,
+      "durationMs": 1705,
+      "repeats": 8,
+      "maximumDurationMs": 215,
+      "attempts": [
+        {
+          "runId": "shell_62be24665e804c9dc6e2980062f619d1",
+          "status": "succeeded",
+          "stdout": "gate-1",
+          "durationMs": 214
+        },
+        {
+          "runId": "shell_c6d26fd107c57340348afd21f8509f1d",
+          "status": "succeeded",
+          "stdout": "gate-2",
+          "durationMs": 213
+        },
+        {
+          "runId": "shell_2948f146921f1b3a75172c3fd9b6f393",
+          "status": "succeeded",
+          "stdout": "gate-3",
+          "durationMs": 213
+        },
+        {
+          "runId": "shell_a2de256e1bab9f52787dfc3a0b3d08ca",
+          "status": "succeeded",
+          "stdout": "gate-4",
+          "durationMs": 212
+        },
+        {
+          "runId": "shell_e5a9122f21fa88779399f3d267e431b4",
+          "status": "succeeded",
+          "stdout": "gate-5",
+          "durationMs": 213
+        },
+        {
+          "runId": "shell_ac338cc212e8c03e57f87df6ed43d8a4",
+          "status": "succeeded",
+          "stdout": "gate-6",
+          "durationMs": 211
+        },
+        {
+          "runId": "shell_4f1bcf1b3cbe6e52a9dddba9fd3c8349",
+          "status": "succeeded",
+          "stdout": "gate-7",
+          "durationMs": 215
+        },
+        {
+          "runId": "shell_abeba4a89225db2748ada4f58210fe22",
+          "status": "succeeded",
+          "stdout": "gate-8",
+          "durationMs": 214
+        }
+      ]
+    },
+    {
+      "name": "non-zero-exit-is-reported",
+      "ok": true,
+      "durationMs": 214,
+      "runId": "shell_640d76c6e65f2d6fa01aa7ec3cabef07",
+      "status": "failed",
+      "exitCode": 7,
+      "stderr": "oops",
+      "errorCode": "COMMAND_EXIT_NONZERO"
+    },
+    {
+      "name": "cancel-kills-the-process-group",
+      "ok": true,
+      "durationMs": 16,
+      "runId": "shell_3d35dc4fa81d9d4d8fba91ec09343e28",
+      "status": "cancelled",
+      "cancelledPid": 58015,
+      "processGone": true,
+      "errorCode": "CANCELLED"
+    },
+    {
+      "name": "timeout-is-reported",
+      "ok": true,
+      "durationMs": 2057,
+      "runId": "shell_dbda433db9400725f705ee74126b34c4",
+      "status": "timed_out",
+      "errorCode": "TIMEOUT"
+    },
+    {
+      "name": "background-process-does-not-pin-the-slot",
+      "ok": true,
+      "durationMs": 2061,
+      "runId": "shell_d7f9bd68d5a52a935377705eb406a022",
+      "status": "succeeded",
+      "stdout": "detached-ok"
+    },
+    {
+      "name": "idempotency-and-task-isolation",
+      "ok": true,
+      "durationMs": 221,
+      "runId": "shell_fc71372a1101b7adfadcfeb287e0e45f",
+      "replayedSameRun": true,
+      "conflictingCommandStatus": 409,
+      "crossTaskVisible": false
+    },
+    {
+      "name": "audit-is-durable-and-private",
+      "ok": true,
+      "durationMs": 3,
+      "auditPath": "work/local-control/state/audit.jsonl",
+      "auditMode": "0600",
+      "runsDirectoryMode": "0700",
+      "runFileMode": "0600",
+      "runsChecked": 14,
+      "auditRecords": 141
+    }
+  ],
+  "summary": {
+    "total": 9,
+    "passed": 9,
+    "failed": 0
+  }
+}

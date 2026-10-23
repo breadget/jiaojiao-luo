@@ -9,6 +9,7 @@
  */
 
 import { DEFAULT_LLM_BASE_URL, DEFAULT_LLM_MODEL } from '@/lib/server/llm';
+import type { LlmReasoningEffort } from '@/lib/llm/providers';
 
 export const URTORIS_PROTOCOL = 'urtoris.v1';
 
@@ -36,8 +37,18 @@ export type UrtorisErrorCode =
   | 'INTENT_UNKNOWN'
   | 'INTERNAL_ERROR';
 
-export type UrtorisEngine = 'n8n' | 'model' | 'simulated';
-export type UrtorisMode = 'llm' | 'rules' | 'simulated';
+export type UrtorisEngine =
+  | 'n8n'
+  | 'model'
+  | 'simulated'
+  | 'retrieval'
+  | 'program';
+export type UrtorisMode =
+  | 'llm'
+  | 'rules'
+  | 'simulated'
+  | 'retrieval'
+  | 'program';
 
 /** 每个错误码的：中文说明 + 是否值得重试 + 建议的 HTTP 状态码。 */
 export const ERROR_CATALOG: Record<
@@ -91,9 +102,11 @@ export function errorLabel(code: UrtorisErrorCode): string {
 }
 
 export type UrtorisLlmConfig = {
+  provider?: string;
   apiKey?: string;
   baseUrl?: string;
   model?: string;
+  reasoningEffort?: LlmReasoningEffort;
 };
 
 export type UrtorisRequestMeta = {
@@ -178,11 +191,13 @@ export type BuildRequestInput = {
 export function buildRequest(input: BuildRequestInput): UrtorisRequest {
   const requestId = input.requestId?.trim() || createRequestId();
   const context: Record<string, unknown> = { ...input.context };
-  if (input.llm?.apiKey) {
+  if (input.llm && (input.llm.apiKey || input.llm.provider === 'ollama')) {
     context.llm = {
+      ...(input.llm.provider ? { provider: input.llm.provider } : {}),
       apiKey: input.llm.apiKey,
       baseUrl: input.llm.baseUrl || DEFAULT_LLM_BASE_URL,
       model: input.llm.model || DEFAULT_LLM_MODEL,
+      reasoningEffort: input.llm.reasoningEffort ?? 'auto',
     };
   }
 

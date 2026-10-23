@@ -1,344 +1,287 @@
-# 克隆环境 Canary Runbook
+# 隔离 Graph Runtime Canary Runbook
 
-更新：2026-09-11（含本机完整 n8n 启动、真实执行与 `none` 专项结果）　绑定基线标签：站点 `156a672` / 工具链 `2c4b599`（两者都打了 `canary-2026-09-11`，尚未推送标签）
+更新：2026-09-13。基线 `origin/main@0f14948`，分支 `codex/graph-runtime-canary`。
+架构见 [ADR 001](ADR-001-GRAPH-RUNTIME-EVENTS.md)，本轮机器可读结果见
+[evidence/graph-runtime-canary.json](evidence/graph-runtime-canary.json)。
+旧记录完整保留在 [2026-09-11 历史记录](CANARY_HISTORY_2026-09-11.md)，其中的历史通过项不代替本轮证据。
 
----
+## 边界与前置检查
 
-## 当前 Canary 状态：**部分通过**，不要当作生产验收
+**禁止连接生产 n8n、生产数据库或生产模型 Key。Deploy 继续 Adapter locked。**
+本轮为 Windows 本机独立 SQLite 配置/数据目录、独立 workerd D1、真实 n8n 2.38.6，
+模型使用本地 OpenAI 兼容替身。它验证执行引擎与协议，不声称访问过 DashScope，
+也不声称已演练生产数据备份的升级。生产备份及原版本配置没有提供，不能补造该证据。
 
-2026-09-11 在本机跑了一轮隔离 Canary。最初把 `127.0.0.1:5679` 上只有
-`/healthz` 的进程误认成 n8n 主服务；复核监听端口后确认它其实是 Task Runner
-broker。把 broker 从默认的 5679 移到 5680 后，npm 安装的 n8n 2.38.6 主服务、
-REST、Webhook 与真实执行全部正常。因此早先“npm 路线不可行”的结论已撤销。
+开始前逐项核对：
 
-### 已通过（真实 HTTP / 真实 D1，非单元测试）
+1. 新 checkout 必须从 `0f14948` 创建，现有工作目录、数据库、迁移和历史测试保留。
+2. 克隆根目录使用独立绝对路径，名字含 clone/canary；磁盘有足够空间保存全部 execution data。
+   禁止把生产目录、网络共享或指向生产数据的 junction/symlink 用作克隆目录。
+3. 本轮新建配置和数据库。若后续使用运维提供的**离线脱敏备份**，先核对来源、校验和、
+   导出时的 n8n/数据库版本、加密配置以及恢复命令；备份原件只读，迁移只在第二份复制件执行。
+   清除旧凭据、Webhook URL、错误工作流、外部数据库/Redis/SMTP 配置，所有工作流先停用。
+   不运行远端 dump、迁移或升级命令。
+4. 检查继承的 DB_TYPE、DB_SQLITE_DATABASE、DB_POSTGRESDB_*、EXECUTIONS_MODE、
+   QUEUE_BULL_REDIS_*、N8N_USER_FOLDER、N8N_ENCRYPTION_KEY；不能继承生产配置。
+   启动脚本强制 sqlite / regular / internal runner，数据只写入 clone-data/.n8n。
+5. 站点 3000、n8n 主服务 5679、JS runner broker 5680、模型替身 5690 均只监听 loopback。
+   5679 的 /healthz 单独不足以证明 n8n 主服务已启动；还要检查 /rest/settings 与真实 Webhook。
+6. 必须同时存在环境变量 `URTORIS_CLONE_CANARY=1` 和文件 `graph-runtime-clone.json`，
+   marker 为 `isolated-urtoris-graph-canary`，版本为 `2.38.6`。forwarder 校验数据库 realpath
+   在克隆目录内、只读打开，并拒绝非固定 loopback 事件地址。
 
-| 项 | 证据 |
-| --- | --- |
-| n8n 2.38.6 完整启动 | `127.0.0.1:5679` 的 `/`、`/healthz`、`/rest/settings` 与已发布 `/webhook/*` 均真实可达；Task Runner broker 独立监听 `5680` |
-| 站点真实 HTTP 契约 | 正确令牌 → `200 {"ok":true,"bound":true}`；错误令牌 → `401`；缺 `requestId` → `400 BINDING_INVALID` 且零写入；**n8n 内部 workflowId → `404 BINDING_UNKNOWN_WORKFLOW`** |
-| 真实提前绑定 | n8n 主执行在危险节点前上报 `execution.bound`；D1 精确落下 `requestId ↔ executionId ↔ wf_n8n_*`，错误内部 workflowId 被 404 拒绝 |
-| 无 Key 产品语义 | W1 / W2 / W5 均真实返回 `success=true, mode=rules, degraded=true`；不是“AI 成功” |
-| Condition 分流 | W2 经理请求走 true（`slack.addToChannel` 动作意图），普通成员走 false（`directory.updateProfile`） |
-| fail-closed | 故意挂错内部令牌后，返回 `BINDING_FAILED`；执行数据只含 Webhook、校验、绑定与 Respond 节点，未进入任何 LLM / Tool / 业务 HTTP 节点 |
-| telemetry 游标 | 首次读取拿到 `execution.bound` + 终态事件；以 `nextSeq` 重拉返回 0 条，无重复 |
-| 成功执行终态（`all`） | 主 Canary 库 40 条 `success`，`status='running' AND stoppedAt IS NULL` 为 0 |
-| `none` 专项 | 在独立复制库同时设置全局和 11 个工作流级 `none`；并发执行分配到 id 46–57 后，`execution_entity` / `execution_data` 均无 46+ 行，永久 running 为 0，2.35.7 故障未在 2.38.6 复现 |
-| `n8n audit` | 实际执行 exit 0；收紧后 community packages / version notifications / templates / public API / diagnostics 全为 `false`；剩余为项目所需 Code/HTTP 节点风险清单 |
-| 鉴权与 workflowId 拒绝 | 同上（401 / 404 均为实际响应） |
-| 迁移 | `0008` **此前从未应用过**，本次应用后 4 个新列齐全；`0007` 三张表在位 |
-| 种子与导入 | 5 个 `wf_n8n_*` 行；11 个 workflow + 2 个 httpHeaderAuth 凭据导入且全部发布成功 |
+## 准备运行时与 D1
 
-第 4 条那个 404 值得单独记住：如果生成器还像修复前那样写死 n8n 的 id，
-**这一条会变成生产事故**（绑定全部失败、5 个工作流一起 `BINDING_FAILED`），
-而不是现在这样被明确拒绝。
+以下 PowerShell 命令在独立 checkout 执行。`$cloneRoot` 不得指向现有用户目录或生产目录。
+本轮目录是 `D:\202609\graph-canary-runtime`；重做时使用一个新的空目录。
+Node 需要支持 node:sqlite（本轮 v24.19.0）。应用依赖按仓库锁文件安装。
+本轮没有 Docker/WSL，使用 npm 分发的 n8n 真正启动主进程和 JS runner。
 
-### 尚未验证（仍阻止 Canary 全通过）
+```powershell
+$cloneRoot = 'D:\202609\graph-canary-repro'
+$env:URTORIS_CLONE_CANARY = '1'
+New-Item -ItemType Directory -Path $cloneRoot
+$env:npm_config_cache = Join-Path $cloneRoot 'npm-cache'
+# 可用 npm install --prefix；本轮实际用 pnpm 10 的独立前缀安装。
+pnpm --dir $cloneRoot --store-dir (Join-Path $cloneRoot 'pnpm-store') add n8n@2.38.6
+node (Join-Path $cloneRoot 'node_modules/n8n/bin/n8n') --version
+node --import tsx deploy/n8n/prepare-graph-clone.ts $cloneRoot
+```
 
-- Graph Adapter 产物中 Memory `sessionKey` 的真实 Agent 执行（当前生成工作流家族不含该 Agent/Memory 图）
-- Qwen / DashScope **真实** endpoint：正确 Key、错误 Key、异常格式与超时矩阵（当前没有一次性测试 Key）
-- 生产数据克隆后的升级与观察窗口；本轮是隔离本机数据，不等于生产迁移演练
-- audit 的过期版本检查因隔离环境无法联网而跳过，需在可联网克隆机重跑该子项
-- Graph 发布后的节点级映射与 Studio 实时点亮；当前 11 个生成工作流没有
-  `workflow_node_bindings`，所以事件按设计进入 `unmappedNodes`
+若 pnpm 禁用了原生安装脚本，需要在此克隆运行时批准并构建 sqlite3 / isolated-vm。
+本轮 sqlite3 经 `npm rebuild sqlite3 --prefix $cloneRoot` 后能加载。
+Windows 跨盘 npm cache 曾导致 EXDEV；使用克隆所在盘的 npm cache 后解决。
+不得以“只有 /healthz”或 CLI --version 当作真实 Canary 通过。
 
-**因此本 runbook 通过标准仍是 §9 的全部门槛，本轮不算通过。**
+prepare 脚本拒绝覆盖已有 `.dev.vars` 或 clone marker；生成随机一次性测试凭据，
+只写入被忽略的 `.dev.vars` 与克隆根目录，不读取旧环境密钥。
+脚本同时生成本地 D1 配置和完整 0000–0009 SQL。新库执行一次：
 
-> **铁律**：本文所有步骤只允许在**克隆环境**执行。
-> 在 canary 全部通过之前：Deploy 保持锁定、不碰生产 n8n、不填真实 Key、
-> 不开放公网 n8n API、不设置 `saveDataSuccessExecution=none`。
+```powershell
+npx.cmd wrangler d1 execute site-creator-d1 --local --persist-to .wrangler/state --config outputs/canary.wrangler.json --file outputs/canary-migrations.sql
+node node_modules/vinext/dist/cli.js dev --hostname 127.0.0.1 --port 3000
+```
 
----
+已存在的**离线克隆库**先用 PRAGMA table_info / sqlite_master 核对已应用迁移，
+只执行缺失迁移，不能重放整个建表脚本。本次新增 `0009_graph_runtime_events.sql`：
+`n8n_runtime_streams` 固定绑定版本与 sourceSeq，`n8n_runtime_receipts` 保存幂等收据。
+旧 `0007/0008`、Graph/WorkflowStep 原子双写范围均不改动。
 
-## 0. 前置条件（缺一不可）
+另一个终端发布站点 Graph，物化只含 credential ID 的 n8n 导入副本：
 
-| 检查 | 命令 | 期望 |
+```powershell
+$env:URTORIS_CLONE_CANARY = '1'
+node --import tsx deploy/n8n/run-graph-canary.ts $cloneRoot --setup
+node --import tsx deploy/n8n/materialize-graph-clone.ts $cloneRoot
+$env:N8N_USER_FOLDER = Join-Path $cloneRoot 'clone-data'
+$env:DB_TYPE = 'sqlite'
+$env:DB_SQLITE_DATABASE = 'database.sqlite'
+node (Join-Path $cloneRoot 'node_modules/n8n/bin/n8n') import:credentials --input="$cloneRoot/credentials.json"
+node (Join-Path $cloneRoot 'node_modules/n8n/bin/n8n') import:workflow --input="$cloneRoot/workflow.json"
+node (Join-Path $cloneRoot 'node_modules/n8n/bin/n8n') publish:workflow --id=urtoris-graph-canary
+```
+
+实际 n8n 2.38.6 使用 `publish:workflow`；发布命令提示必须重启主进程才生效。
+发布 Graph 快照、物化导入副本、n8n publish 是三个明确步骤；不解锁站点 Deploy。
+原始编译产物只有 credentialRef，挂载后导入副本不是原始 golden，分别记录 hash。
+
+## 11 个工作流：导入和激活顺序
+
+本仓库不包含生成器本体。需要只读工具链 `generated/all-workflows.json` 和
+`generated/manifest.json`；本轮使用同工作区已有工具链，无生产访问。
+prepare-family 只改导入副本的 loopback 端口 5678 → 5679，不修改工具链源文件。
+
+```powershell
+node --import tsx deploy/n8n/prepare-family-clone.ts $cloneRoot 'D:\202609\jiaojiao-luo-toolchain\generated'
+node (Join-Path $cloneRoot 'node_modules/n8n/bin/n8n') import:credentials --input="$cloneRoot/family-credentials.json"
+node (Join-Path $cloneRoot 'node_modules/n8n/bin/n8n') import:workflow --input="$cloneRoot/family-workflows.json"
+$familyOrder = Get-Content -Raw (Join-Path $cloneRoot 'family-import-order.json') | ConvertFrom-Json
+foreach ($workflowId in $familyOrder) {
+  node (Join-Path $cloneRoot 'node_modules/n8n/bin/n8n') publish:workflow --id=$workflowId
+  if ($LASTEXITCODE -ne 0) { throw "Publish failed: $workflowId" }
+}
+```
+
+顺序固定为：
+
+1. urtoris-common-auth
+2. urtoris-common-llm
+3. urtoris-common-envelope
+4. urtoris-common-log
+5. urtoris-global-error-handler
+6. urtoris-wf-llm-smoke
+7. urtoris-wf-user-manager
+8. urtoris-wf-security-analysis
+9. urtoris-wf-api-gateway
+10. urtoris-wf-customer-insights
+11. urtoris-gateway
+
+批量文件先导入依赖关系，逐个按上述顺序 publish，最后重启。核对 `workflow_entity`
+中 11 个 activeVersionId 均非空以及启动日志的激活记录。
+本轮 11 个工作流验证导入/激活；Qwen/Memory/Condition 真实执行矩阵针对 Graph 产物，
+不能把它写成 11 个业务工作流都完成了端到端业务验收。
+
+## 凭据挂载与事件服务
+
+| credentialRef / 导入 ID | n8n credential 类型 | 内容来源 |
 | --- | --- | --- |
-| 两个仓库干净 | `git status --short` | 无输出 |
-| 标签就位 | `git rev-parse --short canary-2026-09-11^{commit}` | 站点 `156a672` / 工具链 `2c4b599` |
-| 工具链门禁全绿 | 见 §4 | 6 条命令全 exit 0 |
-| 独立验收 | `node /tmp/verify-binding.mjs` | `5/5` |
-| 站点门禁全绿 | `cd <site> && npm test && npx oxlint` | 全部通过 / 0 错（以当前命令输出为准，不手写易漂移总数） |
-| Node 版本 | `node -v` | **≥ 24**（n8n 2.38.6 的 `engines` 就是 `>=24.0.0`，低于它装不起来） |
-| **站点 IPv4 可达** | `curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:3000/api/state` | `200`（**必须是 127.0.0.1，不是 localhost**） |
-| **n8n 健康** | `curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:<port>/healthz` | `200` |
-| **n8n REST 已挂载** | `curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:<port>/rest/workflows` | **不是 404**（401/403 都算正常） |
-| **webhook 路由已挂载** | `curl -s -o /dev/null -w '%{http_code}' -X POST -H 'Content-Type: application/json' -d '{}' http://127.0.0.1:<port>/webhook/urtoris/llm-smoke` | **不是 404**（无 Bearer 时应为 403） |
+| headerAuth / canary-webhook | httpHeaderAuth | Authorization: Bearer + 随机测试 webhook token |
+| urtorisEventsHeaderAuth / canary-internal | httpHeaderAuth | Authorization: Bearer + 随机 URTORIS_INTERNAL_TOKEN |
+| openAiApi / canary-model | openAiApi | 随机测试 apiKey，base URL 仅 http://127.0.0.1:5690/v1 |
+| 11 工作流的 urtoris-internal-token / urtoris-webhook-auth | httpHeaderAuth | 同一组克隆测试 token 的独立引用 ID |
 
-最后两项是本轮踩到的坑：`/healthz` 返回 200 **不代表命中的就是 n8n 主服务**。
-若主端口与 Task Runner broker 撞端口，`127.0.0.1` 可能只命中 broker 的 health
-路由。必须同时验证 REST 与业务 Webhook；任一 preflight 不通过就停止。
+站点内部事件接口只接受正确 Bearer；HTTP 守卫要求 200 且 JSON 的 ok、bound 都是布尔 true。
+400/401/404/409/503（即使 body 声称 ok）停止在危险节点之前。
+启动三个独立终端；不要输出 test-secrets 内容：
 
-任一不满足就停在这里，不要往下走。
-
----
-
-## 1. 克隆环境
-
-### ✅ 方案 A：本机 npm 隔离启动（本轮已实测可用）
-
-关键是让主服务端口与 Task Runner broker **不同**：
-
-```bash
-export N8N_USER_FOLDER=/tmp/n8n-clone/data
-export N8N_PORT=5679
-export N8N_RUNNERS_BROKER_PORT=5680
-export N8N_PUBLIC_API_DISABLED=true
-export N8N_DIAGNOSTICS_ENABLED=false
-export N8N_COMMUNITY_PACKAGES_ENABLED=false
-export N8N_TEMPLATES_ENABLED=false
-export N8N_VERSION_NOTIFICATIONS_ENABLED=false
-./node_modules/.bin/n8n start
+```powershell
+$env:URTORIS_CLONE_CANARY = '1'
+./deploy/n8n/start-graph-clone.ps1 -CloneRoot $cloneRoot
+# 第二个终端
+node --import tsx deploy/n8n/local-qwen-substitute.ts $cloneRoot
+# 第三个终端
+$cloneSecrets = Get-Content -Raw (Join-Path $cloneRoot 'test-secrets.json') | ConvertFrom-Json
+$env:URTORIS_INTERNAL_TOKEN = $cloneSecrets.internal
+node --import tsx deploy/n8n/forward-graph-executions.ts $cloneRoot
 ```
 
-错误现场是：主服务监听 IPv6 的 `:::5679`，broker 监听 IPv4 的
-`127.0.0.1:5679`；所以 curl IPv4 时只看见 broker 的 `/healthz`，其他路径全 404。
-移动 broker 后，`127.0.0.1:5679/`、`/rest/settings` 与 Webhook 全部正常。
+`EXECUTIONS_DATA_SAVE_ON_SUCCESS=all`、`EXECUTIONS_DATA_SAVE_ON_ERROR=all` 必须同时在
+全局环境及 workflow settings 为 all；观察期间不裁剪 execution data。不要用 none。
+forwarder 仅转换终态快照；进程崩溃/缺快照保留 pending，不造成功。
+逐事件等待 ACK；转发进程遇到拒绝或断网非零退出，修复配置/站点服务后原命令重启，
+从 SQLite 重放，D1 receipts 去重。不能删除收据后“重试”。
 
-n8n 启动日志仍提示：
+## 执行矩阵与观察
 
-> Running n8n outside a container is deprecated. Future versions will require
-> running n8n via the official Docker image.
-
-这是“未来版本将要求 Docker”的弃用预告，**不是 2.38.6 当前路由 404 的原因**。
-本机 npm 方案适合隔离功能验证；生产同构性仍以官方容器为佳。
-
-### ✅ 方案 B：官方 Docker 镜像（生产同构路线）
-
-```bash
-docker run -d --name n8n-canary \
-  --network host \
-  -e N8N_PORT=5679 \
-  -e N8N_RUNNERS_BROKER_PORT=5680 \
-  -e N8N_ENCRYPTION_KEY=<固定值，必须与 CLI 一致> \
-  -e N8N_SECURE_COOKIE=false \
-  -e N8N_PUBLIC_API_DISABLED=true \
-  -e N8N_DIAGNOSTICS_ENABLED=false \
-  -e N8N_COMMUNITY_PACKAGES_ENABLED=false \
-  -e N8N_TEMPLATES_ENABLED=false \
-  -e N8N_VERSION_NOTIFICATIONS_ENABLED=false \
-  -e EXECUTIONS_DATA_SAVE_ON_SUCCESS=all \
-  -e EXECUTIONS_DATA_SAVE_ON_ERROR=all \
-  -v /tmp/n8n-canary-data:/home/node/.n8n \
-  docker.n8n.io/n8nio/n8n:2.38.6
+```powershell
+node --import tsx deploy/n8n/run-graph-canary.ts $cloneRoot
+node --import tsx deploy/n8n/setup-no-key-canary.ts $cloneRoot
+# 停止 n8n 和 forwarder，再导入/发布 no-key，重启两者以加载新的 marker。
+node (Join-Path $cloneRoot 'node_modules/n8n/bin/n8n') import:workflow --input="$cloneRoot/nokey-workflow.json"
+node (Join-Path $cloneRoot 'node_modules/n8n/bin/n8n') publish:workflow --id=urtoris-graph-nokey
+node --import tsx deploy/n8n/check-no-key-canary.ts $cloneRoot
 ```
 
-该命令面向隔离 Linux 克隆机。生成器的事件地址**默认**是
-`http://127.0.0.1:3000`，所以 Docker bridge 会把 127.0.0.1 解释成容器自己；
-要么使用 Linux host networking，要么在生成时用 `URTORIS_EVENTS_URL` 指向真实
-宿主地址。macOS Docker 不应照抄这条 host-network 命令。
+六例矩阵验证 body 展平、request/session/question/channel/urgency、同 session 上下文复用、
+不同 session 隔离、high true / normal false、合法 envelope、模型成功、401、TCP 断开和异常 JSON。
+替身的 401 模式代表测试凭据被提供方拒绝，不使用真实云 Key；TCP 主动断开验证 NETWORK_ERROR。
+无 Key 必须显式 `credentialRef=none` + `fallbackPolicy=rules`，返回 rules/degraded=true，
+模型与 Memory 不执行并标 skipped。已声明凭据引用却忘记挂载是配置失败，不应悄悄变规则成功。
+Simple Memory 跨本机执行复用，重启后不持久，也不声称支持多 worker 共享上下文。
 
-### ⚠️ 站点必须绑 IPv4：用 `--hostname`，不要用 `--host`
+绑定拒绝实测：停止 n8n；生成并导入五个故障副本；逐个 publish；重启：
 
-生成的绑定节点默认把事件打到 `http://127.0.0.1:3000/api/n8n/events`
-（可在生成时用 `URTORIS_EVENTS_URL` 覆盖）。
-实测踩坑：`vinext dev --host 0.0.0.0` 会被**静默忽略**（帮助里只有 `-H, --hostname`），
-结果只绑到 IPv6 `[::1]:3000`，IPv4 的 `127.0.0.1` 连接被拒 → 绑定全部失败。
-
-```bash
-npx vinext dev --hostname 0.0.0.0 --port 3000   # ✅ 绑 *
-npx vinext dev --host 0.0.0.0 --port 3000       # ❌ 被忽略，只绑 IPv6
+```powershell
+node --import tsx deploy/n8n/prepare-binding-faults.ts $cloneRoot
+node (Join-Path $cloneRoot 'node_modules/n8n/bin/n8n') import:workflow --input="$cloneRoot/binding-faults.json"
+foreach ($status in 400,401,404,409,503) {
+  node (Join-Path $cloneRoot 'node_modules/n8n/bin/n8n') publish:workflow --id="urtoris-graph-bind-$status"
+}
+# 重启后
+node --import tsx deploy/n8n/check-binding-faults.ts $cloneRoot
 ```
 
-### 持久化与导入顺序
+故障副本指向本地状态注入器，只有 URL 不同；实际执行数据须仅含 Webhook、校验、绑定、守卫，
+Agent/Model/Memory/HTTP/Tool/Robot 均未执行。它们是故障测试副本，不冒充原始编译产物。
 
-- n8n 的数据目录**必须挂 volume**：否则重建容器后凭据解密的加密密钥与
-  已导入数据一起丢失（本机那轮就踩过 `Mismatching encryption keys`——
-  server 用随机密钥启动、CLI 又用另一个密钥，直接导致 CLI 全线报错）。
-- 顺序固定：**先导入 11 个 workflow + 2 个凭据，再开始真实执行验证**。
+未映射节点实测：`prepare-unmapped-canary.ts` 生成带一个真实额外 Code 节点的导入漂移副本；
+停止 n8n 后导入 `unmapped-workflow.json`、publish `urtoris-graph-unmapped`，重启 n8n 和 forwarder，
+运行 `check-unmapped-canary.ts`。脚本临时切换**克隆**既有绑定，finally 恢复原 URL；
+若进程被强杀，先从本轮 graph.json 和固定 loopback URL 恢复绑定再继续。
+额外节点只能显示 unmapped，不能猜内部 ID。
 
----
+浏览器验收使用独立安装的 Playwright 和本机 Edge：设置 `CANARY_EDGE_PATH`，运行
+`check-studio-canary.ts`。浏览器使用临时 profile 并阻止非 loopback 请求。
+可用 `pnpm --dir $cloneRoot add playwright@1.63.0` 安装浏览器驱动；
+本轮 Edge 路径为 `C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe`。
+由于 Run 按钮目前没有 prompt 输入框，测试驱动只在发出的请求里补入合成测试输入；
+不模拟任何 HTTP 响应、n8n 执行或 telemetry。成功 DOM 为 6 success + 1 skipped，
+401 后为 2 个 error 节点，Inspector 显示 code/message/脱敏 detail，两次都到达已定稿；Deploy disabled。
+截图和原始执行数据留在克隆目录，不把密钥或原始提示上传到仓库。
 
-## 2. 备份
+实际 HTTP 协议复核运行 `check-runtime-protocol.ts`：重放已保存的真实 binding 得到
+200/duplicate，错误 token 401、无效请求 400、未知工作流 404，execution/workflow/session/version
+冲突和终态后的 node.started 均 409。以 limit=3 分页重拉与完整事件序列逐个比较。
+`check-forwarder-reconnect.ts --begin` 须在 forwarder 停止时执行：虽然模型完成，telemetry
+只能看到 binding，仍是 running；重启 forwarder 后执行 `--finish`，补齐事件且无重复/丢失。
+这些脚本只发真实 HTTP，不模拟 D1 或引擎结果。
 
-```bash
-STAMP=$(date +%Y%m%d-%H%M%S)
-mkdir -p /tmp/canary-backup/$STAMP
-cp -a /var/lib/urtoris/data        /tmp/canary-backup/$STAMP/d1
-cp -a /opt/urtoris/app/.dev.vars   /tmp/canary-backup/$STAMP/ 2>/dev/null || true
-cp -a /etc/nginx                   /tmp/canary-backup/$STAMP/ 2>/dev/null || true
-cp -a /etc/systemd/system/n8n.service /etc/systemd/system/urtoris.service /tmp/canary-backup/$STAMP/ 2>/dev/null || true
-cp -a "$N8N_USER_FOLDER/database.sqlite" /tmp/canary-backup/$STAMP/n8n-clone.sqlite
-cp -a /opt/urtoris/app/drizzle     /tmp/canary-backup/$STAMP/drizzle
-ls -la /tmp/canary-backup/$STAMP
+最终版本启动后完整观察至少 **30 分钟**：
+
+```powershell
+node --import tsx deploy/n8n/observe-graph-clone.ts $cloneRoot
 ```
 
-**验收**：能看到 d1 / n8n sqlite / drizzle 三类备份。
-**回滚点**：这一份就是全量回滚源，后续任何一步失败都可以回来。
+若工具托管的长任务在会话恢复时退出，可用 Windows 隐藏进程启动器代替上述前台终端：
+`start-canary-services.ps1 -CloneRoot $cloneRoot` 记录各 helper 的 PID 和启动时间；
+主服务就绪后用 `-Only observation` 启动观察器，转发器恢复用 `-Only forwarder`。
+已有活进程/manifest 时不重复全量启动。停止时用 `stop-canary-services.ps1`，核对 PID
+和启动时间后仅停止该克隆的进程树。它不删除数据库、配置或日志。
+本轮一次工具会话中断导致最终版观察仅到约 5 分钟，因此该窗口作废；随后从零重跑，
+只有最终完整窗口计入验收。前一版已完成的 30 分钟记录保留为历史证据。
 
----
+脚本每 15 秒只读检查 execution_entity：
 
-## 3. 应用迁移 `0007` / `0008`
-
-```bash
-cd <site>
-for f in drizzle/0007_workflow_graph.sql drizzle/0008_workflow_graph_publish.sql; do
-  npx wrangler d1 execute <DB_NAME> --local --file "$f"
-done
+```sql
+SELECT id, workflowId, status, startedAt, stoppedAt
+FROM execution_entity
+WHERE status='running' AND stoppedAt IS NULL
+  AND julianday(startedAt) < julianday('now','-2 minutes');
 ```
 
-**两个迁移都是 add-only**：`0007` 建三张新表，`0008` 只给 `workflows` 加一列、给
-`workflow_versions` 加三列再加一个索引，**不重写任何已有行**。
+必须零行；窗口末尾全部 running 为 0。`observation.json` 必须 complete=true、pass=true，
+不能截短窗口。启动日志、SQLite/WAL、测试结果、本地 D1 状态保留到验收结束。
 
-**验收**：
+## 回滚与恢复演练
 
-```bash
-npx wrangler d1 execute <DB_NAME> --local --command \
-  "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'workflow_%'"
-# 期望：workflow_graph_drafts / workflow_node_bindings / workflow_versions
+先停止接入新请求，再停止克隆 n8n 和 forwarder。离线备份 clone-data（包含 config、SQLite/WAL），
+保留原件。使用已有历史的**精确** n8n versionId，不能重新编译覆盖历史：
 
-npx wrangler d1 execute <DB_NAME> --local --command "PRAGMA table_info(workflows)"
-# 期望：多出 active_graph_version_id
+```powershell
+# 本轮真实旧版本和当前版本；复现环境须查询自己的 workflow_history，不能套用这些 UUID。
+node --import tsx deploy/n8n/rollback-graph-clone.ts $cloneRoot 2 73724cbd-107e-469f-9c57-240c41779338
+# 重启 n8n、forwarder
+node --import tsx deploy/n8n/check-rollback-canary.ts $cloneRoot
+# 再停止两个进程，恢复当前版本
+node --import tsx deploy/n8n/rollback-graph-clone.ts $cloneRoot 3 b582bb3b-78fe-4043-9eb3-444d01ea19e9
+# 重启后再执行 check-rollback-canary.ts
 ```
 
-**回滚**：`0008` 加的列可以留着（SQLite 不能直接 DROP COLUMN 老版本，但留着无害，
-新代码不读它）；`0007` 的三张表可以 `DROP TABLE`，因为此时还没有任何发布版本。
+helper 校验 clone marker、sqlite 路径、历史节点中 graphVersion 与 Webhook ID；核心命令为
+`n8n publish:workflow --id=<clone-workflow> --versionId=<history-version>`，然后调用站点旧版 rollback API。
+Graph 发布指针只移动，历史版本和 bindings 不删除。CLI 或站点切换失败保持服务停止；
+修复后重做两边切换，不能在版本不一致时继续发请求。
+校验 high/normal 两次运行、execution.bound 第一条、终态 completed、boundVersion 正确。
+最后恢复当前版本，检查 11 个 workflow 激活、陈旧 running 为零。
 
----
+## 全量检查与证据导出
 
-## 4. 部署站点代码与工具链产物
+依次执行 `npm test`、`npx tsc --noEmit`、`npx oxlint`、`npm run build`，每项必须 exit 0。
+Windows 使用 npm.cmd/npx.cmd，避免 PowerShell 包装器丢弃参数。
+可设置 `URTORIS_TOOLCHAIN_GENERATED_DIR` 指向只读工具链 generated，启用跨仓库契约测试。
+保留日志为 `outputs/final-test.log`、`final-tsc.log`、`final-oxlint.log`、`final-build.log`，
+并将实际命令/退出码数组写入 `outputs/final-validation.json`。
+运行 `node --import tsx deploy/n8n/collect-graph-canary.ts $cloneRoot --final`，它会检查原始执行、
+输入、错误脱敏、11 个激活状态、确定性 hash、全部检查结果和观察时长后才写入
+`docs/evidence/graph-runtime-canary.json`。不带 --final 只写克隆目录内的预览，不冒充通过。
+只有观察完成、所有断言通过时 complete 才能为 true。
 
-```bash
-# 工具链：先生成、再门禁、最后才产出
-cd /Users/bird/Documents/机器人
-export URTORIS_N8N_INTERNAL_BASE_URL=http://127.0.0.1:5679
-export URTORIS_EVENTS_URL=http://127.0.0.1:3000/api/n8n/events
-node tools/build-workflows.mjs
-node tools/validate-workflows.mjs
-node tools/test-node-versions.mjs
-node tools/test-execution-binding.mjs
-node tools/test-mode-semantics.mjs
-node tools/deploy-n8n.mjs --dry-run        # 必须包含 mode/degraded 回归且全绿
+本轮 npm test 为 291 项，290 通过，1 项既有可选真实云 Qwen Key 测试因无云 Key 跳过；
+允许的本地替身方案已在真实 n8n 跑完全部 Canary，没有跳过实际引擎验证。
 
-# 站点：走安全重建流程（2C/1.6G 上不要在跑着 n8n 时直接 npm run build）
-cd <site> && node tools/deploy-urtoris.mjs  # 或克隆机上直接 bash deploy/rebuild-safe.sh
-```
+## 失败处理、清理与生产状态
 
-⚠️ **端口要点**：默认事件地址是 `http://127.0.0.1:3000/api/n8n/events`；内部网关
-默认回调 n8n `127.0.0.1:5678`。克隆端口不同必须在**生成前**设置上面两个变量，
-并检查 `generated/manifest.json`。地址错了会导致绑定 `BINDING_FAILED` 或网关
-`UPSTREAM_ERROR`，不能靠容器端口映射猜测。
+任意断言失败先保存脱敏结果，停止测试接入，再 Ctrl+C 停止四个本机服务和观察器。
+保留 DB/配置供只读诊断；不要把“无事件”改成成功，也不要删除失败 execution 伪造干净统计。
+若 forwarder 失败，修复后重启重放；如果快照已丢失，保持未完成并明确记录阻塞。
 
-**验收**：站点 `GET /api/state` 返回 200 且带 `Cache-Control: no-store`。
+仅在不再需要本机复核后清理本任务创建的数据目录。先检查 Resolve-Path 的绝对路径、clone marker，
+确认服务停止，且待删目录严格处于指定 cloneRoot 内，再用同一 PowerShell 的
+`Remove-Item -LiteralPath <已核对的目录> -Recurse`；不跨 shell 拼接删除命令，不删除 pnpm/node_modules
+junction 的外部目标。本轮默认保留克隆证据，停止进程即可回收运行资源。
+关闭本地 `.dev.vars` 的 Canary 开关即可恢复 503；该文件本来就不提交。
 
----
-
-## 5. 挂载凭据 + 导入 11 个 workflow（其中 5 个 prebound）
-
-需要两个 Header Auth 凭据（名字必须与产物里的引用一致）：
-
-| 凭据名（n8n credential name） | 用途 |
-| --- | --- |
-| `Urtoris Internal Token` | 工作流 → 站点 `/api/n8n/events`（值 = `URTORIS_INTERNAL_TOKEN`） |
-| `Urtoris Webhook Bearer` | 站点 → 工作流 webhook（值 = `N8N_WEBHOOK_TOKEN`） |
-
-```bash
-# 业务工作流是 5 个 prebound；common-*、错误处理器与网关共 6 个 legacy
-# 可导入 generated/all-workflows.json，但发布必须先 common-*，再业务，最后网关
-for wf in urtoris-wf-llm-smoke urtoris-wf-user-manager urtoris-wf-security-analysis \
-          urtoris-wf-api-gateway urtoris-wf-customer-insights; do
-  ./node_modules/.bin/n8n import:workflow --input="/path/generated/$wf.json"
-done
-```
-
-**验收**：导入后 `meta.urtorisBinding` 为 `prebound` 的 5 个工作流，每个都有
-`绑定执行 (execution.bound)` → `归一绑定结果` → `绑定成功?` 三个节点，
-且 `Webhook` 指向 `校验请求`（不是绑定节点）。
-
----
-
-## 6. 逐项验证
-
-| # | 验证项 | 怎么验 | 通过判据 |
-| --- | --- | --- | --- |
-| 1 | `execution.bound` | 正常发一次请求，查 `n8n_events` | 第一条节点事件就是 `execution.bound` |
-| 2 | requestId ↔ executionId | `SELECT * FROM n8n_execution_map WHERE request_id=?` | 有且只有一条，`workflow_id` 是**站点** id（`wf_n8n_*`） |
-| 3 | 重放 / 多 execution 方向 | ① 对外 API 用同 requestId 重发已落库的成功或失败 run；② 直接向绑定入口上报同 requestId + 新 executionId；③ 同 executionId + 新 requestId | ① `replayed=true`、同一 run/execution、n8n 不新增执行；② 200 且两条映射并存；③ 409 且旧绑定不变 |
-| 4 | Memory sessionKey | 看 `绑定成功?` 之后的 Agent 分支、查 Memory 节点执行数据 | `sessionKey` 取到真实 `sessionId`（不是 undefined/空） |
-| 5 | Qwen endpoint | Agent + Chat Model 路径 | 请求打到 DashScope 兼容端点，`responsesApiEnabled` 已关（1.3 默认 true 会踩坑） |
-| 6 | Condition 分支 | 造 high / 非 high 两个请求 | true/false 真的走不同分支（`options.version` 与 typeVersion 2.2 配套） |
-| 7 | 失败不进入危险节点 | 故意停掉站点或填错内部令牌 | 返回 `BINDING_FAILED`，**看不到**任何 LLM/HTTP/Tool 节点执行 |
-| 8 | telemetry + 断线重连 | 轮询 `/api/runs/:requestId/telemetry?afterSeq=` | 记下 `nextSeq`，隔几秒再拉只返回新事件；不重复不丢 |
-
-第 7 项是最关键的一条：**它是整个 fail-closed 设计的实证**。做法是先把
-`URTORIS_INTERNAL_TOKEN` 改错让绑定必然失败，确认工作流在
-`绑定成功?` 就分到 `Respond to Webhook`，n8n 执行记录里**没有** Agent/Tool/HTTP 节点。
-
-本机 2026-09-11 已真实通过 #1、#2、#6、#7、#8；#3 的公开重放与绑定方向
-分别由真实请求和自动化测试覆盖。#4、#5 仍未通过，故 §6 整体仍是未完成。
-
----
-
-## 7. `saveDataSuccessExecution` 专项确认
-
-背景：生产基线 n8n 2.35.7 在 `saveDataSuccessExecution='none'` 时曾不更新
-`execution_entity` 终态，造成 100+ 条永久 `running`。2026-09-11 在完全隔离的
-n8n 2.38.6 上做了两层验证：
-
-- `all`：主 Canary 库 40 条成功执行全部定稿，永久 running 为 0；
-- `none`：复制数据库后，**同时**把全局变量和 11 个工作流级
-  `saveDataSuccessExecution` 改为 `none`。三条真实请求并发执行，执行 id 从 46
-  分配到 57；完成后 `execution_entity` 与 `execution_data` 均无 46+ 行，永久
-  running 为 0。
-
-所以该故障在 2.38.6 本机样本中**未复现**。这不授权直接改生产：生产升级仍需
-用生产数据克隆再跑一次，并保留观察窗口与回滚点。
-
-```bash
-grep -E 'EXECUTIONS_DATA_SAVE' /tmp/n8n.env || echo "未设置（默认 all）"
-# 观察窗口内反复检查有没有永久 running
-sqlite3 "$N8N_USER_FOLDER/database.sqlite" \
-  "SELECT status, COUNT(*) FROM execution_entity GROUP BY status;"
-# 跑完若干次请求后，再查一次：running 应该回归 0
-sqlite3 "$N8N_USER_FOLDER/database.sqlite" \
-  "SELECT COUNT(*) FROM execution_entity WHERE status='running' AND stoppedAt IS NULL;"
-```
-
-**通过判据**：`all` 模式观察窗口结束后永久 running 为 0；隔离 `none` 模式下，
-成功执行可以被完整删除或定稿，但绝不能留下 running 行。只改全局变量不够——
-工作流自身的 `settings.saveDataSuccessExecution='all'` 会覆盖它。
-
----
-
-## 8. `n8n audit`
-
-```bash
-N8N_DIAGNOSTICS_ENABLED=false \
-N8N_PUBLIC_API_DISABLED=true \
-N8N_COMMUNITY_PACKAGES_ENABLED=false \
-N8N_TEMPLATES_ENABLED=false \
-N8N_VERSION_NOTIFICATIONS_ENABLED=false \
-./node_modules/.bin/n8n audit
-```
-
-**通过判据**：实例五项功能开关都为 `false`；所有 Code / HTTP 风险节点逐项属于
-已知生成产物，不出现 `executeCommand` 或未知社区节点；凭据使用彼此独立的令牌。
-本机 audit 已满足这些条件。其版本过期报告因隔离网络无法抓取版本列表而跳过，
-需在可联网克隆机补跑，不能把“跳过”写成通过。
-
----
-
-## 9. 生产灰度门槛
-
-以下**全部**满足才可谈生产：
-
-- [ ] §6 八项全过（尤其第 7 项 fail-closed 实证）
-- [x] §7 本机 2.38.6 的 `all` 与隔离 `none` 样本均无永久 `running`
-- [ ] §8 audit 安全配置与节点清单已审；联网版本检查仍待克隆机补跑
-- [ ] 5 个 prebound 工作流在克隆环境连续跑通，`unmappedNodes` 符合预期
-      （非 Graph 发布的工作流本来就没有绑定行，未映射是**正常状态**）
-- [ ] 生产备份完成且可用
-- [ ] 回滚演练过：指针回滚 + 迁移回滚 + n8n 回滚各一次
-
-**在此之前**：Deploy 锁定、不碰生产 n8n、不填真实 Key、不开放公网 n8n API、
-不设置 `saveDataSuccessExecution=none`。
-
----
-
-## 附：本 runbook 覆盖不到的部分
-
-- **克隆 ECS 的供给**（新机器、DNS、nginx）是基础设施动作，需要人来开机器。
-  本机 npm 方案可继续覆盖功能验证，但不能替代生产数据克隆与网络同构演练。
-- **Qwen / DashScope 真实调用**需要一把测试 Key。**不要**把生产 Key 填进 Graph
-  或任何提交物；只在克隆环境的 n8n 凭据里临时挂载，验证完即撤。
-- 硬件（ESP32）与机器人模拟器不在本 runbook 范围。
+生产保持关闭：缺少生产离线备份迁移证据、queue/多进程/外部数据库 forwarder 实现、
+生产服务监督与容量验证。当前实现专用于单机 SQLite 克隆；不能依据本轮测试批准生产升级。
+最小外部前置条件是运维提供脱敏离线备份及原版本/配置清单；后续只在另一隔离环境恢复、
+重跑迁移与 30 分钟观察，另行评审生产启用。本轮不需要真实 API Key。

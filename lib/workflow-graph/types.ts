@@ -3,6 +3,7 @@ export const studioNodeTypes = [
   'aiAgent',
   'llmModel',
   'memory',
+  'courseKnowledge',
   'tool',
   'condition',
   'httpRequest',
@@ -72,9 +73,9 @@ export type WorkflowGraphV1 = {
   edges: WorkflowGraphEdge[];
   entryNodeIds: string[];
   runtime: {
-    engine: 'n8n';
-    adapter: 'n8n-v1';
-    executionMode: 'webhook';
+    engine: 'n8n' | 'local-sqlite' | 'program';
+    adapter: 'n8n-v1' | 'local-sqlite' | 'program-v1';
+    executionMode: 'webhook' | 'browser' | 'server';
     binding: 'external' | 'draft';
   };
   viewport: { x: number; y: number; zoom: number };

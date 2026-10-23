@@ -1,0 +1,29 @@
+[Unit]
+Description=Urtoris workflow program executor
+After=network.target urtoris-course-assistant.service
+ConditionPathExists=/opt/urtoris/app/services/workflow-program/server.ts
+
+[Service]
+Type=simple
+User=urtoris-program
+Group=urtoris
+WorkingDirectory=/opt/urtoris/app
+Environment=NODE_ENV=production
+Environment=WORKFLOW_PROGRAM_STATE_DIR=/var/lib/urtoris-workflow-program
+Environment=WORKFLOW_PROGRAM_PORT=8030
+Environment=COURSE_ASSISTANT_URL=http://127.0.0.1:8001
+EnvironmentFile=/etc/urtoris/workflow-program.env
+ExecStart=/usr/bin/node --import tsx /opt/urtoris/app/services/workflow-program/server.ts
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=15
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/urtoris-workflow-program
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+
+[Install]
+WantedBy=multi-user.target

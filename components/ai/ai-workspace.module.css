@@ -1,0 +1,78 @@
+.workspace {
+  display: flex;
+  height: 100dvh;
+  min-width: 320px;
+  flex-direction: column;
+  overflow: hidden;
+  background: #111214;
+  color: #f1f2f4;
+  color-scheme: dark;
+}
+
+.header {
+  display: flex;
+  min-height: 64px;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 24px;
+  padding: 10px 24px;
+  border-bottom: 1px solid #303136;
+  background: #1a1b1e;
+}
+
+.home {
+  display: inline-flex;
+  min-height: 44px;
+  align-items: center;
+  gap: 10px;
+  color: #d4d6dc;
+  font-size: 17px;
+  font-weight: 650;
+  letter-spacing: -0.025em;
+  text-decoration: none;
+}
+
+.home:hover {
+  color: #fff;
+}
+
+.header h1 {
+  min-width: 0;
+  flex: 1;
+  margin: 0;
+  font-size: 16px;
+  font-weight: 600;
+  line-height: 1.5;
+}
+
+.header svg {
+  width: 18px;
+  height: 18px;
+  flex: 0 0 auto;
+}
+
+.header :focus-visible {
+  outline: 2px solid #8ca6df;
+  outline-offset: 3px;
+}
+
+.panels {
+  min-height: 0;
+  flex: 1;
+}
+
+@media (max-width: 640px) {
+  .header {
+    gap: 16px;
+    padding: 6px 18px;
+  }
+
+  .home {
+    font-size: 15px;
+  }
+
+  .header h1 {
+    text-align: right;
+    font-size: 14px;
+  }
+}

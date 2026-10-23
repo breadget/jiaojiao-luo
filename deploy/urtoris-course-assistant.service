@@ -1,0 +1,29 @@
+[Unit]
+Description=Urtoris course knowledge assistant
+After=network.target
+
+[Service]
+Type=simple
+User=urtoris
+Group=urtoris
+WorkingDirectory=/opt/urtoris/app/course-assistant
+EnvironmentFile=/etc/urtoris-course.env
+Environment=COURSE_ASSISTANT_STATE_DIR=/var/lib/urtoris-course
+Environment=HF_HUB_OFFLINE=1
+Environment=HF_HUB_DISABLE_TELEMETRY=1
+Environment=LANGCHAIN_TRACING_V2=false
+Environment=OMP_NUM_THREADS=2
+ExecStart=/opt/urtoris/course-runtime/venv/bin/gunicorn course_assistant.wsgi:application --bind 127.0.0.1:8001 --workers 1 --threads 2 --timeout 100 --max-requests 500 --max-requests-jitter 50 --access-logfile - --error-logfile -
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/urtoris-course
+MemoryMax=450M
+TasksMax=64
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

@@ -1,8 +1,11 @@
 import { getD1 } from '@/db';
 import type { AgentAnalysis } from '@/lib/server/agent-brain';
 import type { UrtorisResponse } from '@/lib/server/protocol';
+import type { ProgramJob } from '@/lib/workflow-program/types';
+import type { WorkflowGraphV1 } from '@/lib/workflow-graph/types';
 import { summarizeEnvelope } from '@/lib/server/protocol';
 import type {
+  ChatKnowledgeEvidence,
   N8nEvent,
   N8nExecutionBinding,
   RunEngine,
@@ -148,7 +151,18 @@ export function toPublicRun(run: WorkflowRun): PublicWorkflowRun {
     output: {
       summary: run.output.summary,
       processed: run.output.processed,
-      result: run.status === 'completed' ? '执行完成' : '执行失败',
+      result:
+        run.status === 'completed'
+          ? run.engine === 'retrieval'
+            ? '检索完成'
+            : run.steps.length === 0 && run.engine === 'model'
+              ? '对话完成'
+              : '执行完成'
+          : run.status === 'running'
+            ? '执行中'
+            : run.status === 'queued'
+              ? '等待执行'
+              : '执行失败',
     },
     startedAt: run.startedAt,
     finishedAt: run.finishedAt,
@@ -177,6 +191,12 @@ export function toPublicWorkflow(
     updatedAt: workflow.updatedAt,
     publishedAt: workflow.publishedAt,
     n8nWebhookUrl: workflow.n8nWebhookUrl,
+    ...(workflow.databaseRuntime === 'local-sqlite'
+      ? { databaseRuntime: 'local-sqlite' as const }
+      : {}),
+    ...(workflow.programRuntime === 'program-v1'
+      ? { programRuntime: 'program-v1' as const }
+      : {}),
   };
 }
 
@@ -225,6 +245,7 @@ export async function getLatestWorkflow() {
         version, has_unpublished_changes, created_at, updated_at, published_at,
         n8n_webhook_url
        FROM workflows
+       WHERE deleted_at IS NULL
        ORDER BY updated_at DESC
        LIMIT 1`,
     )
@@ -240,7 +261,7 @@ export async function getWorkflowById(id: string) {
         version, has_unpublished_changes, created_at, updated_at, published_at,
         n8n_webhook_url
        FROM workflows
-       WHERE id = ?
+       WHERE id = ? AND deleted_at IS NULL
        LIMIT 1`,
     )
     .bind(id)
@@ -256,6 +277,7 @@ export async function listWorkflows() {
         version, has_unpublished_changes, created_at, updated_at, published_at,
         n8n_webhook_url
        FROM workflows
+       WHERE deleted_at IS NULL
        ORDER BY updated_at DESC
        LIMIT 24`,
     )
@@ -302,7 +324,47 @@ export async function createWorkflow() {
   return workflow;
 }
 
-export async function getRecentRuns(workflowId?: string) {
+export type DeleteWorkflowResult = 'deleted' | 'not_found' | 'last_workflow';
+
+/**
+ * 从活动列表删除一个工作流。
+ *
+ * 这里故意使用软删除：运行、会话、Graph 草稿和不可变发布版本都是审计证据，
+ * 列表操作不应把它们级联清空。最后一个活动工作流也不会被删除，避免 Studio
+ * 进入没有可编辑目标的损坏状态；用户可以先新建再删除。
+ */
+export async function deleteWorkflow(
+  id: string,
+): Promise<DeleteWorkflowResult> {
+  const existing = await getD1()
+    .prepare(
+      `SELECT id FROM workflows WHERE id = ? AND deleted_at IS NULL LIMIT 1`,
+    )
+    .bind(id)
+    .first<{ id: string }>();
+  if (!existing) return 'not_found';
+
+  const now = Date.now();
+  const result = await getD1()
+    .prepare(
+      `UPDATE workflows
+       SET deleted_at = ?, updated_at = ?
+       WHERE id = ?
+         AND deleted_at IS NULL
+         AND (SELECT COUNT(*) FROM workflows WHERE deleted_at IS NULL) > 1`,
+    )
+    .bind(now, now, id)
+    .run();
+
+  return (result.meta?.changes ?? 0) > 0 ? 'deleted' : 'last_workflow';
+}
+
+export async function getRecentRuns(
+  workflowId?: string,
+  options: { limit?: number; offset?: number } = {},
+) {
+  const limit = Math.min(Math.max(options.limit ?? 8, 1), 100);
+  const offset = Math.min(Math.max(options.offset ?? 0, 0), 10_000);
   const statement = workflowId
     ? getD1()
         .prepare(
@@ -310,15 +372,17 @@ export async function getRecentRuns(workflowId?: string) {
            FROM runs
            WHERE workflow_id = ?
            ORDER BY started_at DESC
-           LIMIT 8`,
+           LIMIT ? OFFSET ?`,
         )
-        .bind(workflowId)
-    : getD1().prepare(
-        `SELECT ${RUN_COLUMNS}
+        .bind(workflowId, limit, offset)
+    : getD1()
+        .prepare(
+          `SELECT ${RUN_COLUMNS}
          FROM runs
          ORDER BY started_at DESC
-         LIMIT 8`,
-      );
+         LIMIT ? OFFSET ?`,
+        )
+        .bind(limit, offset);
 
   const result = await statement.all<RunRow>();
   return result.results.map(mapRun);
@@ -410,7 +474,13 @@ export async function recordExecutionBinding(
 ): Promise<ExecutionBindingOutcome> {
   const existing = await getExecutionBindingByExecutionId(input.executionId);
   if (existing) {
-    if (existing.requestId === input.requestId) {
+    if (
+      existing.requestId === input.requestId &&
+      existing.workflowId === input.workflowId &&
+      (!input.sessionId ||
+        !existing.sessionId ||
+        existing.sessionId === input.sessionId)
+    ) {
       // 幂等：同一对重复上报，什么都不用改
       return { binding: existing, created: false, conflict: false };
     }
@@ -453,7 +523,13 @@ export async function recordExecutionBinding(
     // 并发下另一方先插进去了：读回来按同样的规则处理，不要覆盖
     const winner = await getExecutionBindingByExecutionId(input.executionId);
     if (!winner) throw cause;
-    if (winner.requestId === input.requestId) {
+    if (
+      winner.requestId === input.requestId &&
+      winner.workflowId === input.workflowId &&
+      (!input.sessionId ||
+        !winner.sessionId ||
+        winner.sessionId === input.sessionId)
+    ) {
       return { binding: winner, created: false, conflict: false };
     }
     if ((options.onConflict ?? 'keep') === 'reject') {
@@ -679,6 +755,7 @@ export async function saveWorkflow(input: {
   n8nWebhookUrl?: string | null;
 }) {
   const current = await getWorkflowById(input.id);
+  if (!current) return null;
   const now = Date.now();
   const publishing = input.action === 'publish';
   const nextVersion = publishing
@@ -850,6 +927,8 @@ export async function createChatRun(
     reply?: string;
     engine?: RunEngine;
     model?: string;
+    knowledge?: ChatKnowledgeEvidence;
+    preserveReply?: boolean;
     /** 并发幂等 claim 预留的运行 id。 */
     runId?: string;
     /** 协议 v1 的链路信息，直接落库，便于按 requestId 反查。 */
@@ -937,8 +1016,12 @@ export async function createChatRun(
         ? `${engine === 'model' ? '模型' : engine === 'n8n' ? 'n8n' : '模拟'}执行失败 · ${options.trace.errorCode}`
         : `${analysis.intent} · ${analysis.priority}优先级`,
       processed: steps.length,
+      ...(options?.knowledge ? { knowledge: options.knowledge } : {}),
+      ...(options?.model ? { model: options.model } : {}),
       result: options?.reply
-        ? truncateText(options.reply, 400)
+        ? options?.preserveReply
+          ? options.reply
+          : truncateText(options.reply, 400)
         : `已回复：${analysis.action}`,
     },
     startedAt,
@@ -952,12 +1035,215 @@ export async function createChatRun(
   return persistRunIdempotent(run);
 }
 
+/** A conversation answer is not evidence that the selected workflow ran. */
+export async function createAssistantRun(
+  workflow: WorkflowRecord,
+  message: string,
+  options: {
+    reply: string;
+    engine: 'model' | 'retrieval';
+    model?: string;
+    knowledge: ChatKnowledgeEvidence;
+    startedAt: number;
+    requestId: string;
+    sessionId: string | null;
+    runId?: string;
+    errorCode?: string;
+  },
+): Promise<WorkflowRun> {
+  const finishedAt = Date.now();
+  const failed = Boolean(options.errorCode);
+  return persistRunIdempotent({
+    id: options.runId ?? crypto.randomUUID(),
+    workflowId: workflow.id,
+    workflowName: workflow.name,
+    workflowVersion: workflow.version,
+    status: failed ? 'failed' : 'completed',
+    steps: [],
+    logs: [
+      {
+        at: options.startedAt,
+        level: 'system',
+        message: `智能体对话 · ${truncateText(message, 28)}`,
+      },
+      {
+        at: finishedAt,
+        level: failed ? 'error' : 'success',
+        message: failed
+          ? `智能体请求失败 · ${options.errorCode}`
+          : options.engine === 'retrieval'
+            ? '课程原文检索完成；未调用模型或执行工作流'
+            : '共享模型已返回对话回答；未执行工作流',
+      },
+    ],
+    output: {
+      summary: failed
+        ? `智能体请求失败 · ${options.errorCode}`
+        : options.engine === 'retrieval'
+          ? '课程原文检索'
+          : '智能体对话',
+      processed: 0,
+      result: options.reply,
+      knowledge: options.knowledge,
+      ...(options.model ? { model: options.model } : {}),
+    },
+    startedAt: options.startedAt,
+    finishedAt,
+    engine: options.engine,
+    requestId: options.requestId,
+    sessionId: options.sessionId,
+    mode: options.engine === 'model' ? 'llm' : 'retrieval',
+    degraded: options.engine === 'retrieval',
+    durationMs: finishedAt - options.startedAt,
+    attempts: options.engine === 'model' ? 1 : 0,
+    errorCode: options.errorCode ?? null,
+    errorMessage: failed ? options.reply : null,
+  });
+}
+
+/** Persist facts from the executor snapshot; terminal runs cannot regress. */
+export async function syncProgramRun(
+  workflow: WorkflowRecord,
+  job: ProgramJob,
+  context: { requestId: string; sessionId: string; graph: WorkflowGraphV1 },
+): Promise<WorkflowRun> {
+  const stopped = job.status === 'cancelled' || job.status === 'failed';
+  const status: WorkflowRun['status'] =
+    job.status === 'cancelled' ? 'failed' : job.status;
+  const result =
+    job.result?.text ??
+    (job.error?.message ||
+      (job.status === 'queued'
+        ? '程序正在排队。'
+        : job.status === 'running'
+          ? '程序已启动，可在运行面板查看进度。'
+          : job.status === 'cancelled'
+            ? '程序已取消。'
+            : '程序已完成。'));
+  const logs: RunLog[] = Object.values(job.nodes)
+    .flatMap((node) => [
+      ...(node.startedAt
+        ? [
+            {
+              at: node.startedAt,
+              level: 'info' as const,
+              message: `${node.name} 开始执行`,
+              stepId: `step_${node.id}`,
+            },
+          ]
+        : []),
+      ...(node.finishedAt
+        ? [
+            {
+              at: node.finishedAt,
+              level:
+                node.state === 'error'
+                  ? ('error' as const)
+                  : node.state === 'skipped'
+                    ? ('info' as const)
+                    : ('success' as const),
+              message: `${node.name} ${node.state === 'error' ? `失败：${node.error ?? '执行失败'}` : node.state === 'skipped' ? '未走此分支' : '完成'}`,
+              stepId: `step_${node.id}`,
+            },
+          ]
+        : []),
+    ])
+    .sort((a, b) => a.at - b.at);
+  const steps: WorkflowStep[] = Object.values(job.nodes).map((node) => {
+    const type = context.graph.nodes.find((item) => item.id === node.id)?.type;
+    return {
+      id: `step_${node.id}`,
+      title: node.name,
+      detail: '',
+      kind:
+        type === 'trigger'
+          ? 'input'
+          : type === 'output'
+            ? 'output'
+            : type === 'condition'
+              ? 'decision'
+              : type === 'aiAgent'
+                ? 'compose'
+                : 'transform',
+    };
+  });
+  const output: WorkflowRun['output'] = {
+    summary: `程序${job.status === 'completed' ? '已完成' : job.status === 'cancelled' ? '已取消' : job.status === 'failed' ? '执行失败' : job.status === 'queued' ? '等待执行' : '执行中'}`,
+    result,
+    processed: Object.values(job.nodes).filter(
+      (node) => node.state === 'success',
+    ).length,
+    programJobId: job.id,
+    ...(job.result?.model ? { model: job.result.model.model } : {}),
+  };
+  if (job.result?.sources.length)
+    output.knowledge = {
+      mode: job.result.model ? 'llm' : 'retrieval_only',
+      sources: job.result.sources,
+    };
+  const run: WorkflowRun = {
+    id: job.id,
+    workflowId: job.workflowId,
+    workflowName: workflow.name,
+    workflowVersion: job.workflowVersion,
+    status,
+    steps,
+    logs,
+    output,
+    startedAt: job.startedAt ?? job.createdAt,
+    finishedAt: job.finishedAt,
+    requestId: context.requestId,
+    sessionId: context.sessionId,
+    engine: 'program',
+    mode: 'program',
+    degraded: false,
+    errorCode: stopped
+      ? (job.error?.code ??
+        (job.status === 'cancelled' ? 'PROGRAM_CANCELLED' : 'PROGRAM_FAILED'))
+      : null,
+    errorMessage: stopped ? result : null,
+    durationMs:
+      job.finishedAt === null
+        ? null
+        : Math.max(0, job.finishedAt - (job.startedAt ?? job.createdAt)),
+    attempts: 1,
+  };
+  await getD1()
+    .prepare(`INSERT INTO runs (id,workflow_id,workflow_name,workflow_version,status,steps_json,logs_json,output_json,started_at,finished_at,request_id,session_id,engine,error_code,error_message,duration_ms,attempts,mode,degraded)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET status=excluded.status,steps_json=excluded.steps_json,logs_json=excluded.logs_json,output_json=excluded.output_json,started_at=excluded.started_at,finished_at=excluded.finished_at,error_code=excluded.error_code,error_message=excluded.error_message,duration_ms=excluded.duration_ms
+    WHERE runs.status IN ('queued','running')`)
+    .bind(
+      run.id,
+      run.workflowId,
+      run.workflowName,
+      run.workflowVersion,
+      run.status,
+      JSON.stringify(run.steps),
+      JSON.stringify(run.logs),
+      JSON.stringify(run.output),
+      run.startedAt,
+      run.finishedAt,
+      run.requestId,
+      run.sessionId,
+      run.engine,
+      run.errorCode,
+      run.errorMessage,
+      run.durationMs,
+      run.attempts,
+      run.mode,
+      0,
+    )
+    .run();
+  return (await getRunByRequestId(context.requestId)) ?? run;
+}
+
 export type N8nRunContext = {
   message?: string;
   startedAt?: number;
   sessionId?: string | null;
   /** 幂等 claim 预生成的运行 id；不传则新建。 */
   runId?: string;
+  knowledge?: ChatKnowledgeEvidence;
 };
 
 /**
@@ -1035,6 +1321,7 @@ export async function createN8nRun(
     logs,
     output: ok
       ? {
+          ...(context?.knowledge ? { knowledge: context.knowledge } : {}),
           summary: `${
             envelope.mode === 'llm'
               ? '真实模型'
@@ -1046,6 +1333,7 @@ export async function createN8nRun(
           result: summaryText,
         }
       : {
+          ...(context?.knowledge ? { knowledge: context.knowledge } : {}),
           summary: `n8n 执行失败 · ${envelope.error?.code ?? 'UNKNOWN'}`,
           processed: 0,
           result: summaryText,

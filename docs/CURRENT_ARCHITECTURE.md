@@ -1,5 +1,7 @@
 # Workflow Studio 架构分析
 
+> 新增原生程序路径（2026-10-15）：支持的画布可经 `program-v1` 发布为固定版本，由独立后台服务真实执行。输入、课程检索、共用模型、条件、字段映射和文本输出的当前能力见 [WORKFLOW_PROGRAM.md](WORKFLOW_PROGRAM.md)。下文保留 2026-09-11 的第一阶段基线；其中“n8n 是唯一运行引擎”和“部署全锁”等描述不适用于新增原生程序路径。
+
 > 基线：`main@c0c1302`，2026-09-11。
 >
 > 本文是 Workflow Studio 第一阶段的架构基线。2026-09-11 评审通过后已实现首个 MVP：新增 `/studio`、Internal Graph 类型/校验、Graph 草稿 API 与 `0007_workflow_graph.sql`；随后的增量补上了 n8n Adapter v1、不可变发布快照与真实运行事件流（游标轮询），状态见 [WORKFLOW_GRAPH_RELEASE.md](WORKFLOW_GRAPH_RELEASE.md)。详细字段、界面和迁移步骤分别见 [WORKFLOW_SCHEMA.md](WORKFLOW_SCHEMA.md)、[WORKFLOW_UI_DESIGN.md](WORKFLOW_UI_DESIGN.md) 与 [MIGRATION_PLAN.md](MIGRATION_PLAN.md)。

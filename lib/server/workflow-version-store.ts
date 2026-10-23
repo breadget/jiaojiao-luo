@@ -12,24 +12,41 @@
  */
 import { getD1 } from '@/db';
 import {
-  ADAPTER_ID,
-  ADAPTER_VERSION,
   compileGraphToN8n,
   compileStats,
 } from '@/lib/workflow-graph/adapter/n8n-v1';
 import type {
   AdapterIssue,
   CompiledNodeBinding,
+  CompileResult,
 } from '@/lib/workflow-graph/adapter/types';
 import type { WorkflowGraphV1 } from '@/lib/workflow-graph/types';
+import { hasLocalDatabaseNodes } from '@/lib/workflow-graph/local-database';
+import {
+  compileGraphToProgram,
+  programCompileStats,
+  programPublishedSteps,
+  programSnapshot,
+  type ProgramCompileResult,
+} from '@/lib/workflow-graph/adapter/program';
+import {
+  compileGraphToLocalSqlite,
+  localSqliteCompileStats,
+  localSqlitePublishedSteps,
+  localSqliteSnapshot,
+  type LocalSqliteCompileResult,
+} from '@/lib/workflow-graph/adapter/local-sqlite';
 import {
   GraphRevisionConflict,
   getWorkflowGraphDraft,
 } from '@/lib/server/workflow-graph-store';
 
 export class GraphPublishRejected extends Error {
-  constructor(public readonly issues: AdapterIssue[]) {
-    super('Graph 未通过编译，发布已取消。');
+  constructor(
+    public readonly issues: AdapterIssue[],
+    message = 'Graph 未通过编译，发布已取消。',
+  ) {
+    super(message);
     this.name = 'GraphPublishRejected';
   }
 }
@@ -89,7 +106,16 @@ const SUMMARY_COLUMNS = `id, workflow_id, version, schema_version, graph_revisio
   graph_hash, adapter, adapter_version, compiled_hash, external_workflow_id,
   webhook_path, node_count, connection_count, published_at, published_by`;
 
-function toSummary(row: WorkflowVersionRow, activeId: string | null): WorkflowVersionSummary {
+function isLocalCompileResult(
+  compiled: CompileResult | LocalSqliteCompileResult | ProgramCompileResult,
+): compiled is LocalSqliteCompileResult {
+  return compiled.adapter === 'local-sqlite' && 'plan' in compiled;
+}
+
+function toSummary(
+  row: WorkflowVersionRow,
+  activeId: string | null,
+): WorkflowVersionSummary {
   return {
     id: row.id,
     workflowId: row.workflow_id,
@@ -211,6 +237,7 @@ export type PublishInput = {
   expectedGraphHash?: string;
   publishedBy?: string | null;
   webhookPath?: string;
+  executionTarget?: 'program';
 };
 
 /**
@@ -236,18 +263,45 @@ export async function publishWorkflowGraph(
   }
 
   const version = await nextVersionNumber(input.workflowId);
-  const compiled = await compileGraphToN8n(draft.graph, {
+  const local =
+    hasLocalDatabaseNodes(draft.graph) ||
+    draft.graph.runtime.engine === 'local-sqlite';
+  const program =
+    !local &&
+    (input.executionTarget === 'program' ||
+      draft.graph.runtime.engine === 'program');
+  const compiled = await (
+    local
+      ? compileGraphToLocalSqlite
+      : program
+        ? compileGraphToProgram
+        : compileGraphToN8n
+  )(draft.graph, {
     workflowId: input.workflowId,
     version,
     webhookPath: input.webhookPath,
   });
 
-  if (!compiled.ok || !compiled.workflow || !compiled.compiledJson) {
+  const localPlan = isLocalCompileResult(compiled) ? compiled.plan : null;
+  const programResult =
+    compiled.adapter === 'program-v1'
+      ? (compiled as ProgramCompileResult)
+      : null;
+  const programPlan = programResult?.plan;
+  if (
+    !compiled.ok ||
+    !compiled.compiledJson ||
+    (local ? !localPlan : program ? !programPlan : !compiled.workflow)
+  ) {
     // 编译失败：一个字都不写。这是"发布失败不得留下半成品"的第一道保证。
     throw new GraphPublishRejected(compiled.issues);
   }
 
-  const stats = compileStats(draft.graph, compiled);
+  const stats = isLocalCompileResult(compiled)
+    ? localSqliteCompileStats(draft.graph, compiled)
+    : programResult
+      ? programCompileStats(draft.graph, programResult)
+      : compileStats(draft.graph, compiled as CompileResult);
   const versionId = `wfv_${crypto.randomUUID()}`;
   const publishedAt = Date.now();
 
@@ -266,13 +320,19 @@ export async function publishWorkflowGraph(
         version,
         draft.graph.schemaVersion,
         draft.graph.revision,
-        JSON.stringify(draft.graph),
+        JSON.stringify(
+          local
+            ? localSqliteSnapshot(draft.graph)
+            : program
+              ? programSnapshot(draft.graph)
+              : draft.graph,
+        ),
         compiled.graphHash,
-        ADAPTER_ID,
-        ADAPTER_VERSION,
+        compiled.adapter,
+        compiled.adapterVersion,
         compiled.compiledJson,
         compiled.compiledHash,
-        input.webhookPath ?? null,
+        local || program ? null : (input.webhookPath ?? null),
         stats.internalNodes,
         stats.connections,
         publishedAt,
@@ -294,13 +354,36 @@ export async function publishWorkflowGraph(
           binding.role,
         ),
     ),
-    getD1()
-      .prepare(
-        `UPDATE workflows
+    (local && localPlan) || (program && programPlan)
+      ? getD1()
+          .prepare(
+            `UPDATE workflows
+         SET active_graph_version_id = ?, updated_at = ?, name = ?, description = ?,
+             published_steps_json = ?, version = ?, published_at = ?,
+             has_unpublished_changes = 0, n8n_webhook_url = NULL
+         WHERE id = ?`,
+          )
+          .bind(
+            versionId,
+            publishedAt,
+            draft.graph.name,
+            draft.graph.description,
+            JSON.stringify(
+              program && programPlan
+                ? programPublishedSteps(draft.graph, programPlan)
+                : localSqlitePublishedSteps(draft.graph, localPlan!),
+            ),
+            version,
+            publishedAt,
+            input.workflowId,
+          )
+      : getD1()
+          .prepare(
+            `UPDATE workflows
          SET active_graph_version_id = ?, updated_at = ?
          WHERE id = ?`,
-      )
-      .bind(versionId, publishedAt, input.workflowId),
+          )
+          .bind(versionId, publishedAt, input.workflowId),
   ];
 
   try {
@@ -341,21 +424,82 @@ export async function rollbackWorkflowGraph(
 ): Promise<{ version: PublishedVersion; previousVersionId: string | null }> {
   const target = await getD1()
     .prepare(
-      `SELECT id FROM workflow_versions WHERE id = ? AND workflow_id = ? LIMIT 1`,
+      `SELECT id, adapter, graph_json, version FROM workflow_versions WHERE id = ? AND workflow_id = ? LIMIT 1`,
     )
     .bind(input.versionId, input.workflowId)
-    .first<{ id: string }>();
+    .first<{
+      id: string;
+      adapter: string;
+      graph_json: string;
+      version: number;
+    }>();
   if (!target) throw new WorkflowVersionNotFound(input.versionId);
 
   const previousVersionId = await getActiveGraphVersionId(input.workflowId);
-  await getD1()
-    .prepare(
-      `UPDATE workflows
+  if (previousVersionId && target.adapter === 'n8n-v1') {
+    const current = await getD1()
+      .prepare(
+        `SELECT adapter FROM workflow_versions WHERE id = ? AND workflow_id = ? LIMIT 1`,
+      )
+      .bind(previousVersionId, input.workflowId)
+      .first<{ adapter: string }>();
+    if (
+      current?.adapter === 'local-sqlite' ||
+      current?.adapter === 'program-v1'
+    ) {
+      const message =
+        '旧 n8n 版本缺少恢复执行配置，请重新发布 n8n 草稿并重新绑定 Webhook。';
+      throw new GraphPublishRejected([{ level: 'error', message }], message);
+    }
+  }
+  if (target.adapter === 'local-sqlite' || target.adapter === 'program-v1') {
+    const program = target.adapter === 'program-v1';
+    const graph = JSON.parse(target.graph_json) as WorkflowGraphV1;
+    const compiled = await (
+      program ? compileGraphToProgram : compileGraphToLocalSqlite
+    )(graph, {
+      workflowId: input.workflowId,
+      version: target.version,
+    });
+    if (!compiled.ok || !compiled.plan)
+      throw new GraphPublishRejected(compiled.issues);
+    await getD1()
+      .prepare(
+        `UPDATE workflows SET active_graph_version_id = ?, updated_at = ?,
+         name = ?, description = ?, published_steps_json = ?, version = ?,
+         has_unpublished_changes = 1, n8n_webhook_url = NULL
+       WHERE id = ?`,
+      )
+      .bind(
+        input.versionId,
+        Date.now(),
+        graph.name,
+        graph.description,
+        JSON.stringify(
+          program
+            ? programPublishedSteps(
+                graph,
+                compiled.plan as import('@/lib/workflow-program/types').ProgramPlan,
+              )
+            : localSqlitePublishedSteps(
+                graph,
+                compiled.plan as import('@/lib/workflow-graph/adapter/local-sqlite').LocalSqlitePlan,
+              ),
+        ),
+        target.version,
+        input.workflowId,
+      )
+      .run();
+  } else {
+    await getD1()
+      .prepare(
+        `UPDATE workflows
        SET active_graph_version_id = ?, updated_at = ?
        WHERE id = ?`,
-    )
-    .bind(input.versionId, Date.now(), input.workflowId)
-    .run();
+      )
+      .bind(input.versionId, Date.now(), input.workflowId)
+      .run();
+  }
 
   const version = await getWorkflowVersion(input.versionId);
   if (!version) throw new WorkflowVersionNotFound(input.versionId);
@@ -370,9 +514,23 @@ export async function previewWorkflowGraph(input: {
   workflowId: string;
   graph: WorkflowGraphV1;
   webhookPath?: string;
+  executionTarget?: 'program';
 }) {
   const version = await nextVersionNumber(input.workflowId);
-  const compiled = await compileGraphToN8n(input.graph, {
+  const local =
+    hasLocalDatabaseNodes(input.graph) ||
+    input.graph.runtime.engine === 'local-sqlite';
+  const program =
+    !local &&
+    (input.executionTarget === 'program' ||
+      input.graph.runtime.engine === 'program');
+  const compiled = await (
+    local
+      ? compileGraphToLocalSqlite
+      : program
+        ? compileGraphToProgram
+        : compileGraphToN8n
+  )(input.graph, {
     workflowId: input.workflowId,
     version,
     webhookPath: input.webhookPath,
@@ -380,6 +538,10 @@ export async function previewWorkflowGraph(input: {
   return {
     nextVersion: version,
     ...compiled,
-    stats: compileStats(input.graph, compiled),
+    stats: isLocalCompileResult(compiled)
+      ? localSqliteCompileStats(input.graph, compiled)
+      : compiled.adapter === 'program-v1'
+        ? programCompileStats(input.graph, compiled as ProgramCompileResult)
+        : compileStats(input.graph, compiled as CompileResult),
   };
 }

@@ -1,0 +1,179 @@
+#!/usr/bin/env bash
+
+set -Eeuo pipefail
+umask 027
+
+app_dir=/opt/urtoris/app
+build_root=/opt/urtoris/builds
+rollback_root=/opt/urtoris/rollback
+lock_file=/run/lock/urtoris-deploy.lock
+max_bundle_bytes=104857600
+
+exec 9>"$lock_file"
+if ! flock -n 9; then
+  echo "Another Urtoris deployment is already running." >&2
+  exit 75
+fi
+
+install -d -o urtoris -g urtoris -m 0750 "$build_root"
+install -d -o urtoris -g urtoris -m 0750 "$rollback_root"
+staging_dir=$(mktemp -d "$build_root/incoming.XXXXXX")
+bundle_file="$staging_dir/source.bundle"
+worktree_dir="$staging_dir/worktree"
+worktree_added=0
+
+cleanup() {
+  if [[ "$worktree_added" == 1 ]]; then
+    sudo -u urtoris env HOME=/var/lib/urtoris \
+      git -C "$app_dir" worktree remove --force "$worktree_dir" \
+      >/dev/null 2>&1 || true
+  fi
+  rm -rf -- "$staging_dir"
+}
+trap cleanup EXIT
+
+# Read at most one byte over the limit so an oversized upload can be rejected.
+dd iflag=fullblock bs=1M count=101 of="$bundle_file" status=none
+bundle_bytes=$(stat -c '%s' "$bundle_file")
+if ((bundle_bytes == 0 || bundle_bytes > max_bundle_bytes)); then
+  echo "Deployment bundle is empty or larger than 100 MiB." >&2
+  exit 65
+fi
+chown urtoris:urtoris "$staging_dir" "$bundle_file"
+chmod 0750 "$staging_dir"
+chmod 0640 "$bundle_file"
+
+sudo -u urtoris env HOME=/var/lib/urtoris \
+  git -C "$app_dir" bundle verify "$bundle_file" >/dev/null
+
+mapfile -t bundle_heads < <(
+  sudo -u urtoris env HOME=/var/lib/urtoris \
+    git -C "$app_dir" bundle list-heads "$bundle_file"
+)
+if [[ ${#bundle_heads[@]} -ne 1 ]]; then
+  echo "Deployment bundle must contain exactly one ref." >&2
+  exit 65
+fi
+
+read -r deploy_sha deploy_ref <<<"${bundle_heads[0]}"
+if [[ ! "$deploy_sha" =~ ^[0-9a-f]{40}$ ]] || \
+  [[ "$deploy_ref" != refs/heads/ci-deploy ]]; then
+  echo "Deployment bundle has an invalid commit or ref." >&2
+  exit 65
+fi
+
+sudo -u urtoris env HOME=/var/lib/urtoris \
+  git -C "$app_dir" fetch "$bundle_file" refs/heads/ci-deploy
+fetched_sha=$(sudo -u urtoris env HOME=/var/lib/urtoris \
+  git -C "$app_dir" rev-parse FETCH_HEAD)
+if [[ "$fetched_sha" != "$deploy_sha" ]]; then
+  echo "Fetched commit does not match the signed-off bundle ref." >&2
+  exit 65
+fi
+
+current_sha=$(sudo -u urtoris env HOME=/var/lib/urtoris \
+  git -C "$app_dir" rev-parse HEAD)
+if ! sudo -u urtoris env HOME=/var/lib/urtoris \
+  git -C "$app_dir" merge-base --is-ancestor "$current_sha" "$deploy_sha"; then
+  echo "Refusing a non-fast-forward production deployment." >&2
+  exit 65
+fi
+
+install -d -o urtoris -g urtoris -m 0750 "$worktree_dir"
+sudo -u urtoris env HOME=/var/lib/urtoris \
+  git -C "$app_dir" worktree add --detach "$worktree_dir" "$deploy_sha"
+worktree_added=1
+
+sudo -u urtoris env HOME=/var/lib/urtoris \
+  npm --prefix "$worktree_dir" ci --no-audit --no-fund
+sudo -u urtoris env HOME=/var/lib/urtoris NODE_OPTIONS=--max-old-space-size=512 \
+  npm --prefix "$worktree_dir" run build
+install -d -o urtoris -g urtoris -m 0755 \
+  "$worktree_dir/dist/server/migrations"
+sudo -u urtoris cp -a \
+  "$worktree_dir/drizzle/." "$worktree_dir/dist/server/migrations/"
+
+# 先用新版本 Wrangler 和新迁移更新持久化 D1，再替换运行时。命令在
+# worktree 内执行，避免受限部署用户的初始工作目录让 workerd 读目录失败；
+# 非交互 stdin 会让 Wrangler 自动确认，并为每次迁移保留自己的备份。
+(
+  cd "$worktree_dir"
+  sudo -u urtoris env HOME=/var/lib/urtoris \
+    /usr/bin/node "$worktree_dir/node_modules/wrangler/bin/wrangler.js" \
+    d1 migrations apply DB --local \
+    --config "$worktree_dir/dist/server/wrangler.json" \
+    --persist-to /var/lib/urtoris/data
+) < /dev/null
+
+previous_dist="$rollback_root/dist"
+previous_modules="$rollback_root/node_modules"
+if [[ -e "$previous_dist" ]]; then
+  mv "$previous_dist" "$staging_dir/obsolete-dist"
+fi
+if [[ -e "$previous_modules" ]]; then
+  mv "$previous_modules" "$staging_dir/obsolete-node_modules"
+fi
+
+systemctl stop urtoris
+mv "$app_dir/dist" "$previous_dist"
+mv "$app_dir/node_modules" "$previous_modules"
+mv "$worktree_dir/dist" "$app_dir/dist"
+mv "$worktree_dir/node_modules" "$app_dir/node_modules"
+chown -R urtoris:urtoris "$app_dir/dist" "$app_dir/node_modules"
+
+sudo -u urtoris env HOME=/var/lib/urtoris \
+  git -C "$app_dir" merge --ff-only "$deploy_sha"
+sudo -u urtoris env HOME=/var/lib/urtoris \
+  git -C "$app_dir" update-ref \
+  refs/remotes/origin/codex/graph-runtime-canary "$deploy_sha"
+
+systemctl start urtoris
+healthy=0
+for _ in {1..20}; do
+  if curl -fsS http://127.0.0.1:3000/studio >/dev/null; then
+    healthy=1
+    break
+  fi
+  sleep 1
+done
+
+if [[ "$healthy" != 1 ]]; then
+  echo "New release failed its health check; restoring the previous runtime." >&2
+  systemctl stop urtoris || true
+  mv "$app_dir/dist" "$staging_dir/failed-dist"
+  mv "$app_dir/node_modules" "$staging_dir/failed-node_modules"
+  mv "$previous_dist" "$app_dir/dist"
+  mv "$previous_modules" "$app_dir/node_modules"
+  systemctl start urtoris
+  exit 1
+fi
+
+# 同步 Python Executor 服务代码并重启。只在已经装了这个服务的主机上执行，
+# 没装的主机跳过，不影响普通网站发布。
+if [[ -d /opt/urtoris/python-executor/services ]]; then
+  rm -rf -- /opt/urtoris/python-executor/services.new
+  cp -a "$worktree_dir/services" /opt/urtoris/python-executor/services.new
+  chown -R root:root /opt/urtoris/python-executor/services.new
+  rm -rf -- /opt/urtoris/python-executor/services
+  mv /opt/urtoris/python-executor/services.new \
+    /opt/urtoris/python-executor/services
+
+  if ! systemctl restart urtoris-python-executor; then
+    echo "Python Executor service failed to restart." >&2
+    exit 1
+  fi
+  executor_healthy=0
+  for _ in {1..15}; do
+    if curl -fsS http://127.0.0.1:3010/health >/dev/null; then
+      executor_healthy=1
+      break
+    fi
+    sleep 1
+  done
+  if [[ "$executor_healthy" != 1 ]]; then
+    echo "Python Executor failed its health check after deployment." >&2
+    exit 1
+  fi
+fi
+
+echo "DEPLOYED=$deploy_sha"

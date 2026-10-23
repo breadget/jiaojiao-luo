@@ -37,11 +37,11 @@ export type WorkflowGraphV1 = {
 };
 
 export type RuntimeTarget = {
-  engine: 'n8n';
-  adapter: 'n8n-v1';
+  engine: 'n8n' | 'local-sqlite';
+  adapter: 'n8n-v1' | 'local-sqlite';
   adapterVersion: string;
   timeoutMs: number;
-  executionMode: 'webhook';
+  executionMode: 'webhook' | 'browser';
   binding?:
     | { kind: 'compiled'; externalWorkflowId?: string }
     | { kind: 'external'; webhookPath: string; externalWorkflowId?: string };
@@ -205,7 +205,7 @@ Node Registry 是以下四处的共同来源：节点库、Inspector 表单、�
 | `tool` | `tool.provider` | 目标 0..1；同一 Tool 第一版不共享给多个 Agent |
 | `condition` | `main.in`、`branch.true`、`branch.false` | 输入 1；两个分支发布时各 1..n |
 | `httpRequest` | `main.in`、`main.out` | 输入 1，输出 0..n |
-| `database` | `main.in`、`main.out` | 输入 1，输出 0..n |
+| `database` | `tool.provider`；兼容 `main.in`、`main.out` | Agent 工具输入最多 1；主链输入最多 1 |
 | `transform` | `main.in`、`main.out` | 输入 1，输出 0..n |
 | `robotAction` | `main.in`、`main.out` | 输入 1，输出 0..n |
 | `subworkflow` | `main.in/out` 或 `subworkflow.provider` | 两种模式互斥 |
@@ -233,6 +233,8 @@ type TriggerConfig = {
 type AiAgentConfig = {
   strategy: 'tools';
   instructions: string;
+  /** 每个 Agent 单独配置的自然语言行为限制；空字符串或省略表示未设置。 */
+  constraints?: string;
   maxIterations: number;
   timeoutMs: number;
   outputSchema?: JsonSchema;
@@ -242,6 +244,10 @@ type AiAgentConfig = {
 ```
 
 `maxIterations` 建议 1–12；`fallbackPolicy=rules` 时必须能在响应中明确写 `mode=rules, degraded=true`。
+
+`constraints` 最多 4000 个字符，可在画布中选中 AI Agent 后，在 Inspector 的「行为限制」中填写，例如「只允许查询订单，不得修改或删除数据」。它与任务指令分开保存，随 Graph 草稿及发布快照保留；辅助 Agent 也可通过自然语言请求生成或修改这个字段。
+
+Adapter 将任务指令和行为限制合并到该 Agent 的 n8n `options.systemMessage` 中；使用端直连模型、Python 文件任务和本机工具任务只加载当前已发布 Graph 中各 Agent 的限制，未发布的草稿修改及客户端传入的限制不会影响运行。含有限制的工作流必须通过真实模型或已部署的工作流执行，模拟入口会返回 `AGENT_CONSTRAINTS_REQUIRE_MODEL`；配置 `credentialRef=none` 的规则备援也不能编译带有限制的 Agent。自然语言限制通过系统提示词影响模型行为，不提供工具层的权限隔离；读写白名单、审批和敏感操作拦截仍需由实际工具实现。n8n 执行需部署包含这些限制的新编译版本。
 
 ### LLM Model
 
@@ -652,3 +658,27 @@ WorkflowStep[]
 - 保存只写最新受支持版本；发布产物保留原版本与 Adapter 版本。
 - v1 不删除未知 `extensions`，但任何未知核心字段都应报错。
 - v2 候选：循环、动态分支、复合节点、可视分组、多人协作和秘密引用权限。
+
+## 13. 本机 SQLite 数据库
+
+新增数据库节点默认使用用户电脑中的 SQLite 文件：
+
+```ts
+config: {
+  provider: 'sqlite',
+  location: 'local',
+  filePath: '/Users/me/data/orders.sqlite', // Windows 示例：C:\\data\\orders.db
+  operation: 'select',
+  maxRows: 100,
+}
+```
+
+`filePath` 是电脑里的绝对文件位置，支持 `.db`、`.sqlite`、`.sqlite3`，最多 2048 字符；不能使用网址、相对路径或 `..`。草稿可保留空文件位置，发布时必须填写。`operation` 只允许 `select`，`maxRows` 是 1–500 的整数，默认为 100。旧数据库快照若没有 `provider/location/filePath`，仍按原来的服务器节点处理，不会自动获得本机文件权限。
+
+推荐连接为 `Trigger → AI Agent → Output`，再从 `AI Agent.resource.tools` 连到 `Database.tool.provider`。Model 必须连接，Memory 可选。数据库保留 `main.in/main.out` 以读取旧快照；处于同一个 Agent 的完整主链上的本机数据库也可作为该 Agent 的查询工具。孤立数据库不会授权给 AI。
+
+包含本机数据库的图使用 `local-sqlite` Adapter。当前支持一个 Trigger、一个 AI Agent、一个 Output，以及连接的 Model、Memory 和数据库；不支持其他执行节点、分支或多个 Agent。编译结果是 `urtoris.local-sqlite.v1` 本机计划，`workflow` 为 `null`，没有 n8n JSON、凭据挂载或外部节点绑定。线上网页通过浏览器与电脑中运行的数据库连接助手通信，服务器不会尝试读取该文件位置，也不保存连接助手的访问密钥。
+
+预览与发布使用同一版本号和确定性的计划内容，`compiledHash` 相同。发布将图和数据库位置固化为不可变快照，同时在同一事务里更新使用端工作流的发布步骤与版本，清除 n8n Webhook 绑定。之后修改草稿文件位置不会影响已发布版本；必须重新发布才能生效。实际文件是否存在与可读取，由电脑中的连接助手验证。
+
+本机版本之间可以回滚。当前本机版本不能直接回滚到历史 n8n 版本，因为历史快照没有保存恢复原执行所需的发布步骤和 Webhook；接口返回 422 并保持当前发布指针和全部工作流数据不变。需要恢复 n8n 时，请重新发布 n8n 草稿并重新绑定 Webhook。

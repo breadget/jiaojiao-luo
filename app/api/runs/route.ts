@@ -1,4 +1,5 @@
 import { callN8nWorkflow } from '@/lib/server/n8n';
+import { isLlmReasoningEffort } from '@/lib/llm/providers';
 import {
   buildRequest,
   DEFAULT_LLM_BASE_URL,
@@ -20,12 +21,20 @@ import {
   getRecentRuns,
   getRunByRequestId,
   getWorkflowById,
+  toPublicRun,
 } from '@/lib/server/workflow-store';
 import {
   enforceExecutionAccess,
   enforceRateLimit,
   readJsonObject,
 } from '@/lib/server/security';
+import { getActiveWorkflowVersion } from '@/lib/server/workflow-version-store';
+import { hasAgentConstraints } from '@/lib/workflow-graph/agent-constraints';
+import { hasLocalDatabaseNodes } from '@/lib/workflow-graph/local-database';
+import {
+  ownedProgramJob,
+  programErrorResponse,
+} from '@/lib/server/workflow-program-store';
 
 export async function GET(request: Request) {
   const accessError = enforceExecutionAccess(request);
@@ -43,12 +52,23 @@ export async function GET(request: Request) {
   const requestId = params.get('requestId');
   if (requestId) {
     const run = await getRunByRequestId(requestId);
+    if (run?.engine === 'program') {
+      try {
+        await ownedProgramJob(request, run.id);
+      } catch (cause) {
+        return programErrorResponse(cause);
+      }
+    }
     return Response.json({ run }, { status: run ? 200 : 404 });
   }
 
   const workflowId = params.get('workflowId') ?? undefined;
   const runs = await getRecentRuns(workflowId);
-  return Response.json({ runs });
+  return Response.json({
+    runs: runs.map((run) =>
+      run.engine === 'program' ? toPublicRun(run) : run,
+    ),
+  });
 }
 
 function readLlmConfig(body: Record<string, unknown>): UrtorisLlmConfig | null {
@@ -67,6 +87,9 @@ function readLlmConfig(body: Record<string, unknown>): UrtorisLlmConfig | null {
       typeof record.model === 'string' && record.model.trim()
         ? record.model.trim()
         : DEFAULT_LLM_MODEL,
+    reasoningEffort: isLlmReasoningEffort(record.reasoningEffort)
+      ? record.reasoningEffort
+      : 'auto',
   };
 }
 
@@ -98,6 +121,28 @@ export async function POST(request: Request) {
 
   const message =
     typeof body.message === 'string' ? body.message.trim().slice(0, 2000) : '';
+
+  const publishedVersion = await getActiveWorkflowVersion(workflow.id);
+  const publishedGraph = publishedVersion?.graph;
+  if (publishedVersion?.adapter === 'program-v1') {
+    return Response.json(
+      {
+        error:
+          '这个工作流是后台程序，请使用程序运行面板或 /api/programs/runs。',
+        errorCode: 'PROGRAM_ENDPOINT_REQUIRED',
+      },
+      { status: 409 },
+    );
+  }
+  if (publishedGraph && hasLocalDatabaseNodes(publishedGraph)) {
+    return Response.json(
+      {
+        error: '本机数据库工作流需要浏览器连接助手，请在对话中运行。',
+        errorCode: 'LOCAL_DATABASE_BROWSER_REQUIRED',
+      },
+      { status: 409 },
+    );
+  }
 
   // 绑定了 n8n webhook 的工作流，交给真实执行引擎；否则用内置模拟执行器。
   if (workflow.n8nWebhookUrl) {
@@ -210,6 +255,17 @@ export async function POST(request: Request) {
         }
       }
     }
+  }
+
+  if (hasAgentConstraints(publishedGraph)) {
+    return Response.json(
+      {
+        error:
+          '当前工作流的 Agent 配置了自然语言行为限制，模拟执行无法应用这些限制。请通过真实模型或已部署的工作流执行。',
+        errorCode: 'AGENT_CONSTRAINTS_REQUIRE_MODEL',
+      },
+      { status: 409 },
+    );
   }
 
   const run = await createCompletedRun(workflow);

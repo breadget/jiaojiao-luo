@@ -1,4 +1,8 @@
-import { guardAdminRequest, jsonResponse, routeWorkflowId } from '@/lib/server/graph-api';
+import {
+  guardAdminRequest,
+  jsonResponse,
+  routeWorkflowId,
+} from '@/lib/server/graph-api';
 import {
   GRAPH_JSON_LIMIT_BYTES,
   findCredentialMaterial,
@@ -35,6 +39,9 @@ export async function POST(
     return jsonResponse({ error: '工作流不存在。' }, 404);
   }
 
+  const executionTarget = parsed.body.executionTarget;
+  if (executionTarget !== undefined && executionTarget !== 'program')
+    return jsonResponse({ error: '执行目标无效。' }, 400);
   const webhookPath = parsed.body.webhookPath;
   if (webhookPath !== undefined && typeof webhookPath !== 'string') {
     return jsonResponse({ error: 'webhookPath 无效。' }, 400);
@@ -69,6 +76,9 @@ export async function POST(
   const preview = await previewWorkflowGraph({
     workflowId: id,
     graph,
+    ...(executionTarget === 'program'
+      ? { executionTarget: 'program' as const }
+      : {}),
     webhookPath: typeof webhookPath === 'string' ? webhookPath : undefined,
   });
 
@@ -84,8 +94,9 @@ export async function POST(
     issues: preview.issues,
     requiredCredentialRefs: preview.requiredCredentialRefs,
     stats: preview.stats,
-    // 明确告诉前端：这里只是预览，部署仍然锁定
+    // 预览不创建运行；原生 program/local-sqlite 发布后由各自执行器运行。
     imported: false,
-    adapterLocked: true,
+    adapterLocked: !['local-sqlite', 'program-v1'].includes(preview.adapter),
+    runnable: ['local-sqlite', 'program-v1'].includes(preview.adapter),
   });
 }

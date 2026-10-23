@@ -1,0 +1,405 @@
+#!/usr/bin/env bash
+
+# Restricted production deployment endpoint for the low-memory production host.
+# GitHub Actions sends one small text header followed by a gzip runtime
+# artifact. The server never runs npm ci or a production build.
+
+set -Eeuo pipefail
+umask 027
+
+app_root=/opt/urtoris
+app_dir="$app_root/app"
+build_root="$app_root/builds"
+rollback_root="$app_root/rollback"
+lock_file=/run/lock/urtoris-runtime-deploy.lock
+max_runtime_bytes=$((900 * 1024 * 1024))
+
+if [[ "$(id -u)" -ne 0 ]]; then
+  echo "The runtime deploy endpoint must run as root." >&2
+  exit 77
+fi
+
+exec 9>"$lock_file"
+if ! flock -n 9; then
+  echo "Another Urtoris deployment is already running." >&2
+  exit 75
+fi
+
+install -d -o root -g urtoris -m 0750 "$build_root"
+install -d -o root -g root -m 0750 "$rollback_root"
+staging_dir=$(mktemp -d "$build_root/incoming.XXXXXX")
+chown root:urtoris "$staging_dir"
+chmod 0750 "$staging_dir"
+archive_file="$staging_dir/runtime.tar.gz"
+members_file="$staging_dir/members.txt"
+release_dir="$staging_dir/release"
+previous_app=""
+app_moved=0
+release_active=0
+n8n_was_active=0
+course_was_active=0
+course_state_saved=0
+course_state_dir=/var/lib/urtoris-course
+course_backup_dir="$staging_dir/course-state-before"
+course_state_items=(index db.sqlite3 db.sqlite3-journal db.sqlite3-wal db.sqlite3-shm)
+program_was_active=0
+program_stopped=0
+
+restore_after_failure() {
+  local result="$1"
+  local recovery_failed=0
+  set +e
+
+  if (( result != 0 )) && [[ "${program_stopped:-0}" == 1 ]]; then
+    # Stop new code before restoring the shared release path. Program state is
+    # durable outside the release and is never rolled back or replayed.
+    systemctl stop urtoris-workflow-program >/dev/null 2>&1 || recovery_failed=1
+  fi
+
+  if (( result != 0 )) && [[ "$app_moved" == 1 ]]; then
+    echo "Deployment failed; restoring the previous Urtoris runtime." >&2
+    systemctl stop urtoris >/dev/null 2>&1 || true
+
+    if [[ "$release_active" == 1 && -d "$app_dir" ]]; then
+      mv "$app_dir" "$staging_dir/failed-app" || recovery_failed=1
+    fi
+    if [[ -n "$previous_app" && -d "$previous_app" ]]; then
+      mv "$previous_app" "$app_dir" || recovery_failed=1
+      chown -R urtoris:urtoris "$app_dir" || recovery_failed=1
+      systemctl start urtoris >/dev/null 2>&1 || recovery_failed=1
+    else
+      recovery_failed=1
+    fi
+  fi
+
+  if (( result != 0 )); then
+    if [[ "$course_state_saved" == 1 ]]; then
+      systemctl stop urtoris-course-assistant >/dev/null 2>&1 || true
+      for item in "${course_state_items[@]}"; do
+        rm -rf -- "$course_state_dir/$item" || recovery_failed=1
+        if [[ -e "$course_backup_dir/$item" ]]; then
+          cp -a "$course_backup_dir/$item" "$course_state_dir/$item" || recovery_failed=1
+        fi
+      done
+      chown -R urtoris:urtoris "$course_state_dir" || recovery_failed=1
+    fi
+    if [[ "$course_was_active" == 1 && "$recovery_failed" == 0 ]]; then
+      systemctl start urtoris-course-assistant >/dev/null 2>&1 || true
+    fi
+    if [[ "${program_stopped:-0}" == 1 && "${program_was_active:-0}" == 1 && "$recovery_failed" == 0 ]]; then
+      systemctl start urtoris-workflow-program >/dev/null 2>&1 || recovery_failed=1
+    fi
+  fi
+
+  if [[ "$n8n_was_active" == 1 ]]; then
+    systemctl start n8n >/dev/null 2>&1 || true
+  fi
+
+  if [[ "$recovery_failed" == 0 ]]; then
+    rm -rf -- "$staging_dir"
+  else
+    echo "Service recovery failed; affected services remain stopped. Recovery backup retained at $course_backup_dir" >&2
+  fi
+  exit "$result"
+}
+
+cleanup() {
+  restore_after_failure "$?"
+}
+trap cleanup EXIT
+
+read -r protocol deploy_sha extra || true
+if [[ "$protocol" != "URTORIS_RUNTIME_V1" ]] || \
+  [[ ! "$deploy_sha" =~ ^[0-9a-f]{40}$ ]] || [[ -n "${extra:-}" ]]; then
+  echo "Deployment stream has an invalid header." >&2
+  exit 65
+fi
+
+# Read one MiB beyond the declared limit so oversized artifacts are rejected
+# without trusting a client-provided Content-Length.
+dd iflag=fullblock bs=1M count=901 of="$archive_file" status=none
+archive_bytes=$(stat -c '%s' "$archive_file")
+if (( archive_bytes == 0 || archive_bytes > max_runtime_bytes )); then
+  echo "Deployment runtime is empty or larger than 900 MiB." >&2
+  exit 65
+fi
+
+if ! tar -tzf "$archive_file" > "$members_file"; then
+  echo "Deployment runtime is not a valid gzip tar archive." >&2
+  exit 65
+fi
+
+# The archive is inspected as root but unpacked as the application account;
+# only that account's group can traverse this one staging directory or read it.
+chown root:urtoris "$archive_file"
+chmod 0640 "$archive_file"
+
+# Reject archive paths that could escape the staging directory. The artifact
+# is extracted as the unprivileged application user as a second safeguard.
+if ! awk '
+  /^\// || /(^|\/)\.\.($|\/)/ { exit 1 }
+' "$members_file"; then
+  echo "Deployment runtime contains an unsafe archive path." >&2
+  exit 65
+fi
+
+install -d -o urtoris -g urtoris -m 0750 "$release_dir"
+runuser -u urtoris -- tar \
+  --extract --gzip --file "$archive_file" --directory "$release_dir" \
+  --no-same-owner --no-same-permissions
+
+if [[ -e "$release_dir/.dev.vars" ]] || [[ ! -s "$release_dir/URTORIS_RELEASE_SHA" ]]; then
+  echo "Deployment runtime has an invalid release manifest." >&2
+  exit 65
+fi
+
+release_sha=$(tr -d '\r\n' < "$release_dir/URTORIS_RELEASE_SHA")
+if [[ "$release_sha" != "$deploy_sha" ]]; then
+  echo "Deployment runtime release manifest does not match its header." >&2
+  exit 65
+fi
+
+for required_path in \
+  package.json \
+  dist/server/wrangler.json \
+  dist/server/migrations \
+  node_modules/wrangler/bin/wrangler.js \
+  node_modules/tsx/package.json \
+  tsconfig.json \
+  services/python-executor/server.ts \
+  services/workflow-program/server.ts \
+  services/workflow-program/executor.ts \
+  services/workflow-program/storage.ts \
+  services/workflow-program/course-transport.ts \
+  lib/workflow-program/engine.ts \
+  lib/workflow-program/types.ts \
+  lib/workflow-program/values.ts \
+  lib/workflow-graph/adapter/program.ts \
+  lib/server/llm.ts \
+  lib/llm/providers.ts; do
+  if [[ ! -e "$release_dir/$required_path" ]]; then
+    echo "Deployment runtime is missing $required_path." >&2
+    exit 65
+  fi
+done
+
+if [[ ! -s "$app_dir/.dev.vars" ]]; then
+  echo "The existing production environment file is missing." >&2
+  exit 78
+fi
+
+# First-time setup is an explicit root operation, never an implicit token
+# rotation during deployment. Fail before migration or stopping a service.
+if ! systemctl cat urtoris-workflow-program.service >/dev/null 2>&1 || \
+   ! id -u urtoris-program >/dev/null 2>&1 || \
+   [[ ! -d /var/lib/urtoris-workflow-program ]] || \
+   [[ ! -s /etc/urtoris/workflow-program.env ]]; then
+  echo "Workflow program service is not prepared. Run deploy/setup-workflow-program.py as root first." >&2
+  exit 78
+fi
+python3 - "$app_dir/.dev.vars" /etc/urtoris/workflow-program.env <<'PY'
+import hmac, pathlib, pwd, re, stat, sys
+try:
+    paths = [pathlib.Path(value) for value in sys.argv[1:]]
+    settings = []
+    for path in paths:
+        details = path.lstat()
+        if not stat.S_ISREG(details.st_mode) or details.st_mode & 0o007:
+            raise ValueError()
+        values = {}
+        for line in path.read_text().splitlines():
+            if line.startswith(("WORKFLOW_PROGRAM_TOKEN=", "WORKFLOW_PROGRAM_URL=", "WORKFLOW_PROGRAM_PORT=", "WORKFLOW_PROGRAM_STATE_DIR=")):
+                name, value = line.split("=", 1)
+                if name in values:
+                    raise ValueError()
+                values[name] = value.strip().strip('"').strip("'")
+        settings.append(values)
+    site, worker = settings
+    token = worker.get("WORKFLOW_PROGRAM_TOKEN", "")
+    if not re.fullmatch(r"[A-Za-z0-9._~+/=-]{32,4096}", token):
+        raise ValueError()
+    if not hmac.compare_digest(token, site.get("WORKFLOW_PROGRAM_TOKEN", "")):
+        raise ValueError()
+    if site.get("WORKFLOW_PROGRAM_URL") != "http://127.0.0.1:8030" or worker.get("WORKFLOW_PROGRAM_PORT", "8030") != "8030":
+        raise ValueError()
+    if worker.get("WORKFLOW_PROGRAM_STATE_DIR", "/var/lib/urtoris-workflow-program") != "/var/lib/urtoris-workflow-program":
+        raise ValueError()
+    state = pathlib.Path("/var/lib/urtoris-workflow-program")
+    if state.is_symlink() or state.resolve() != state or not state.is_dir():
+        raise ValueError()
+    if state.stat().st_uid != pwd.getpwnam("urtoris-program").pw_uid or state.stat().st_mode & 0o077:
+        raise ValueError()
+except (OSError, UnicodeError, ValueError):
+    print("Workflow program private configuration is invalid or does not match the site. Run root setup again.", file=sys.stderr)
+    sys.exit(78)
+PY
+runuser -u urtoris-program -- test -r /etc/urtoris/workflow-program.env
+runuser -u urtoris-program -- test -w /var/lib/urtoris-workflow-program
+(
+  cd "$release_dir"
+  runuser -u urtoris-program -- /usr/bin/node -e \
+    'const [a,b]=process.versions.node.split(".").map(Number); if(a<22||(a===22&&b<13)) process.exit(1)'
+  # Import the complete transitive TS graph on the target Node 22 runtime.
+  # This checks aliases and dependency packaging without running a job.
+  runuser -u urtoris-program -- /usr/bin/node --import tsx --input-type=module -e \
+    'await import("./services/workflow-program/server.ts")'
+) < /dev/null
+
+# Keep production configuration out of GitHub artifacts. It is copied only
+# after the artifact has passed all structural validation.
+install -o urtoris -g urtoris -m 0600 \
+  "$app_dir/.dev.vars" "$release_dir/.dev.vars"
+# Expose only the verified code revision so CI can check the public domain,
+# rather than declaring success against a different host with a healthy page.
+sed -i '/^URTORIS_RELEASE_SHA=/d' "$release_dir/.dev.vars"
+printf '\nURTORIS_RELEASE_SHA=%s\n' "$deploy_sha" >> "$release_dir/.dev.vars"
+chown -R urtoris:urtoris "$release_dir"
+
+# This host deliberately pauses n8n during the small Wrangler migration step:
+# it leaves enough RAM on a 2 GiB instance without taking the public site down.
+if systemctl is-active --quiet n8n; then
+  n8n_was_active=1
+  systemctl stop n8n
+fi
+
+(
+  cd "$release_dir"
+  runuser -u urtoris -- env HOME=/var/lib/urtoris \
+    /usr/bin/node "$release_dir/node_modules/wrangler/bin/wrangler.js" \
+    d1 migrations apply DB --local \
+    --config "$release_dir/dist/server/wrangler.json" \
+    --persist-to /var/lib/urtoris/data
+) < /dev/null
+
+# Stop the program worker before pausing its course dependency or moving the
+# shared code path. A preparation failure restores the old active state too.
+if systemctl is-active --quiet urtoris-workflow-program; then
+  program_was_active=1
+fi
+program_stopped=1
+systemctl stop urtoris-workflow-program
+
+# Course state and model files stay outside the atomic website release. Prepare
+# its small migrations/index metadata before the current website is stopped.
+if systemctl cat urtoris-course-assistant.service >/dev/null 2>&1; then
+  if systemctl is-active --quiet urtoris-course-assistant; then
+    course_was_active=1
+    systemctl stop urtoris-course-assistant
+  fi
+  # Stopping first gives a consistent SQLite and FAISS snapshot. Both a
+  # pre-switch failure and a post-switch rollback restore this exact state,
+  # including PDF timestamps in index metadata. Model cache is unchanged.
+  install -d -m 0750 "$course_backup_dir"
+  for item in "${course_state_items[@]}"; do
+    if [[ -e "$course_state_dir/$item" ]]; then
+      cp -a "$course_state_dir/$item" "$course_backup_dir/$item"
+    fi
+  done
+  course_state_saved=1
+  (
+    cd "$release_dir/course-assistant"
+    for command in migrate index_knowledge; do
+      runuser -u urtoris -- env \
+        COURSE_ASSISTANT_ENV_FILE=/etc/urtoris-course.env \
+        COURSE_ASSISTANT_STATE_DIR=/var/lib/urtoris-course \
+        HF_HUB_OFFLINE=1 HF_HUB_DISABLE_TELEMETRY=1 \
+        /opt/urtoris/course-runtime/venv/bin/python manage.py "$command"
+    done
+  ) < /dev/null
+fi
+
+release_stamp="${deploy_sha:0:12}-$(date -u +%Y%m%dT%H%M%SZ)"
+previous_app="$rollback_root/app-$release_stamp"
+
+systemctl stop urtoris
+mv "$app_dir" "$previous_app"
+app_moved=1
+mv "$release_dir" "$app_dir"
+release_active=1
+# systemd grants Wrangler a single writable state directory under the release.
+# Create it before starting the sandboxed service rather than relying on its
+# first request to create the directory.
+chmod 0755 "$app_dir"
+install -d -o urtoris -g urtoris -m 0750 "$app_dir/.wrangler"
+
+systemctl start urtoris
+for _ in {1..30}; do
+  if curl -fsS http://127.0.0.1:3000/api/state >/dev/null; then
+    break
+  fi
+  sleep 1
+done
+if ! curl -fsS http://127.0.0.1:3000/api/state >/dev/null; then
+  echo "New Urtoris runtime failed its health check." >&2
+  exit 1
+fi
+
+if systemctl cat urtoris-course-assistant.service >/dev/null 2>&1; then
+  systemctl restart urtoris-course-assistant
+  course_healthy=0
+  for _ in {1..30}; do
+    if curl -fsS http://127.0.0.1:8001/api/status/ | \
+      /opt/urtoris/course-runtime/venv/bin/python -c \
+        'import json,sys; sys.exit(0 if json.load(sys.stdin).get("ready") else 1)'; then
+      course_healthy=1
+      break
+    fi
+    sleep 1
+  done
+  if [[ "$course_healthy" != 1 ]]; then
+    echo "Course Assistant failed its health check after deployment." >&2
+    exit 1
+  fi
+fi
+
+# Program source and its TS loader move in the same atomic release as the
+# website. Start after course readiness, then require the expected local service.
+systemctl start urtoris-workflow-program
+program_healthy=0
+for _ in {1..30}; do
+  if systemctl is-active --quiet urtoris-workflow-program && curl --connect-timeout 2 --max-time 3 -fsS http://127.0.0.1:8030/health | \
+    /usr/bin/node -e 'let s="";process.stdin.on("data",c=>s+=c);process.stdin.on("end",()=>{try{const j=JSON.parse(s);process.exit(j.ok===true&&j.service==="workflow-program"?0:1)}catch{process.exit(1)}})'; then
+    program_healthy=1
+    break
+  fi
+  sleep 1
+done
+if [[ "$program_healthy" != 1 ]]; then
+  echo "Workflow program service failed its health check after deployment." >&2
+  exit 1
+fi
+
+# The executor unit points into /opt/urtoris/app, so the code and its matching
+# Node dependencies move atomically with the website runtime above.
+if systemctl cat urtoris-python-executor.service >/dev/null 2>&1; then
+  systemctl restart urtoris-python-executor
+  executor_healthy=0
+  for _ in {1..45}; do
+    if curl -fsS http://127.0.0.1:3010/health >/dev/null; then
+      executor_healthy=1
+      break
+    fi
+    sleep 1
+  done
+  if [[ "$executor_healthy" != 1 ]]; then
+    echo "Python Executor failed its health check after deployment." >&2
+    exit 1
+  fi
+fi
+
+if [[ "$n8n_was_active" == 1 ]]; then
+  systemctl start n8n
+  for _ in {1..45}; do
+    if curl -fsS http://127.0.0.1:5678/healthz >/dev/null; then
+      n8n_was_active=0
+      break
+    fi
+    sleep 1
+  done
+  if [[ "$n8n_was_active" == 1 ]]; then
+    echo "n8n failed its health check after deployment." >&2
+    exit 1
+  fi
+fi
+
+echo "DEPLOYED=$deploy_sha"

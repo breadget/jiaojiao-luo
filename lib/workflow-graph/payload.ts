@@ -3,6 +3,12 @@ import type {
   WorkflowGraphV1,
 } from '@/lib/workflow-graph/types';
 import { studioNodeTypes } from '@/lib/workflow-graph/types';
+import { validateAgentConstraints } from '@/lib/workflow-graph/agent-constraints';
+import {
+  isLocalDatabaseNode,
+  validateLocalDatabaseConfig,
+} from '@/lib/workflow-graph/local-database';
+import type { WorkflowGraphNode } from '@/lib/workflow-graph/types';
 
 /** Graph 草稿的请求体上限；100 个节点的正常草稿远小于它。 */
 export const GRAPH_JSON_LIMIT_BYTES = 512 * 1024;
@@ -54,11 +60,18 @@ function isNode(value: unknown): boolean {
     typeof position.y === 'number' &&
     Array.isArray(value.ports) &&
     value.ports.every(isPort) &&
-    isPlainObject(value.config)
+    isPlainObject(value.config) &&
+    (value.type !== 'aiAgent' ||
+      validateAgentConstraints(value.config.constraints) === null) &&
+    (!isLocalDatabaseNode(value as unknown as WorkflowGraphNode) ||
+      validateLocalDatabaseConfig(value.config, { allowIncomplete: true }) ===
+        null)
   );
 }
 
-function isEndpoint(value: unknown): value is { nodeId: string; portId: string } {
+function isEndpoint(
+  value: unknown,
+): value is { nodeId: string; portId: string } {
   return (
     isPlainObject(value) &&
     typeof value.nodeId === 'string' &&
@@ -116,7 +129,9 @@ export function isWorkflowGraphPayload(
     Array.isArray(graph.entryNodeIds) &&
     graph.entryNodeIds.every((id) => typeof id === 'string') &&
     isPlainObject(runtime) &&
-    runtime.engine === 'n8n' &&
+    (runtime.engine === 'n8n' ||
+      runtime.engine === 'local-sqlite' ||
+      runtime.engine === 'program') &&
     typeof runtime.adapter === 'string' &&
     typeof runtime.executionMode === 'string' &&
     (runtime.binding === 'external' || runtime.binding === 'draft')
@@ -150,7 +165,15 @@ const SECRET_KEY_MARKERS = [
 ];
 
 /** 以这些后缀结尾的键是"引用"而不是"密钥"。 */
-const REFERENCE_SUFFIXES = ['ref', 'id', 'name', 'env', 'path', 'url', 'policy'];
+const REFERENCE_SUFFIXES = [
+  'ref',
+  'id',
+  'name',
+  'env',
+  'path',
+  'url',
+  'policy',
+];
 
 function isSecretKey(key: string): boolean {
   const normalized = key.toLowerCase().replaceAll('-', '').replaceAll('_', '');
