@@ -3,8 +3,11 @@ import {
   findProvider,
   providerOrDefault,
   type LlmProvider,
+  type LlmReasoningEffort,
 } from '@/lib/llm/providers';
 import type { WorkflowRecord } from '@/lib/workflow-types';
+import type { WorkflowGraphV1 } from '@/lib/workflow-graph/types';
+import { buildWorkflowAgentConstraintsPrompt } from '@/lib/workflow-graph/agent-constraints';
 
 export type ChatMessage = {
   role: 'system' | 'user' | 'assistant';
@@ -19,6 +22,8 @@ export type ChatModelRequest = {
   baseUrl?: string;
   /** 覆盖服务商默认模型。 */
   model?: string;
+  /** auto 不发送厂商特定参数；其余值仅在该 provider 支持时映射。 */
+  reasoningEffort?: LlmReasoningEffort;
   messages: ChatMessage[];
   temperature?: number;
   timeoutMs?: number;
@@ -68,7 +73,11 @@ export function resolveLlmSelection(input: {
   model?: string | null;
 }):
   | { ok: true; selection: LlmSelection }
-  | { ok: false; code: 'LLM_UNSUPPORTED_PROVIDER' | 'LLM_ERROR'; error: string } {
+  | {
+      ok: false;
+      code: 'LLM_UNSUPPORTED_PROVIDER' | 'LLM_ERROR';
+      error: string;
+    } {
   const requested =
     typeof input.provider === 'string' ? input.provider.trim() : '';
   if (requested && !findProvider(requested)) {
@@ -176,7 +185,10 @@ function resolveEndpoint(value: string): { url: URL } | { error: string } {
   } catch {
     return { error: 'Base URL 不是合法地址。' };
   }
-  if (url.protocol !== 'https:' && !(url.protocol === 'http:' && isLoopbackHost(url.hostname))) {
+  if (
+    url.protocol !== 'https:' &&
+    !(url.protocol === 'http:' && isLoopbackHost(url.hostname))
+  ) {
     return {
       error: '出于安全考虑，Base URL 必须使用 https（本机地址除外）。',
     };
@@ -195,6 +207,29 @@ type ProtocolPlan = ProtocolRequest & {
   extract: (payload: unknown) => string | null;
 };
 
+const THINKING_BUDGETS: Record<Exclude<LlmReasoningEffort, 'auto'>, number> = {
+  low: 2_048,
+  medium: 8_192,
+  high: 24_576,
+};
+
+function openAiReasoningBody(
+  provider: LlmProvider,
+  effort: LlmReasoningEffort,
+): Record<string, unknown> {
+  if (effort === 'auto' || provider.reasoningMode === 'model-only') return {};
+  if (provider.reasoningMode === 'qwen-thinking') {
+    return {
+      enable_thinking: true,
+      thinking_budget: THINKING_BUDGETS[effort],
+    };
+  }
+  if (provider.reasoningMode === 'openai-effort') {
+    return { reasoning_effort: effort };
+  }
+  return {};
+}
+
 function buildOpenAiChatPlan(input: {
   provider: LlmProvider;
   baseUrl: string;
@@ -202,19 +237,22 @@ function buildOpenAiChatPlan(input: {
   model: string;
   messages: ChatMessage[];
   temperature: number;
+  reasoningEffort: LlmReasoningEffort;
 }): ProtocolPlan {
   return {
     endpoint: `${input.baseUrl}/chat/completions`,
     headers: {
       'Content-Type': 'application/json',
-      ...(input.apiKey
-        ? { Authorization: `Bearer ${input.apiKey}` }
-        : {}),
+      ...(input.apiKey ? { Authorization: `Bearer ${input.apiKey}` } : {}),
     },
     body: {
       model: input.model,
       messages: input.messages,
-      temperature: input.temperature,
+      ...(input.provider.reasoningMode === 'openai-effort' &&
+      input.reasoningEffort !== 'auto'
+        ? {}
+        : { temperature: input.temperature }),
+      ...openAiReasoningBody(input.provider, input.reasoningEffort),
     },
     extract: extractMessageContent,
   };
@@ -229,6 +267,7 @@ function buildAnthropicPlan(input: {
   messages: ChatMessage[];
   temperature: number;
   maxTokens: number;
+  reasoningEffort: LlmReasoningEffort;
 }): ProtocolPlan {
   const system = input.messages
     .filter((message) => message.role === 'system')
@@ -241,6 +280,11 @@ function buildAnthropicPlan(input: {
       content: message.content,
     }));
 
+  const thinkingBudget =
+    input.reasoningEffort === 'auto'
+      ? null
+      : THINKING_BUDGETS[input.reasoningEffort];
+
   return {
     endpoint: input.baseUrl.endsWith('/v1')
       ? `${input.baseUrl}/messages`
@@ -252,8 +296,12 @@ function buildAnthropicPlan(input: {
     },
     body: {
       model: input.model,
-      max_tokens: input.maxTokens,
-      temperature: input.temperature,
+      max_tokens: thinkingBudget
+        ? Math.max(input.maxTokens, thinkingBudget + 1_024)
+        : input.maxTokens,
+      ...(thinkingBudget
+        ? { thinking: { type: 'enabled', budget_tokens: thinkingBudget } }
+        : { temperature: input.temperature }),
       ...(system ? { system } : {}),
       messages: turns,
     },
@@ -286,6 +334,7 @@ function buildGooglePlan(input: {
   model: string;
   messages: ChatMessage[];
   temperature: number;
+  reasoningEffort: LlmReasoningEffort;
 }): ProtocolPlan {
   const system = input.messages
     .filter((message) => message.role === 'system')
@@ -309,7 +358,16 @@ function buildGooglePlan(input: {
     body: {
       contents,
       ...(system ? { systemInstruction: { parts: [{ text: system }] } } : {}),
-      generationConfig: { temperature: input.temperature },
+      generationConfig: {
+        temperature: input.temperature,
+        ...(input.reasoningEffort === 'auto'
+          ? {}
+          : {
+              thinkingConfig: {
+                thinkingBudget: THINKING_BUDGETS[input.reasoningEffort],
+              },
+            }),
+      },
     },
     extract(payload) {
       const error = readEmbeddedError(payload);
@@ -409,6 +467,7 @@ export async function callChatModel(
     messages: request.messages,
     temperature: request.temperature ?? 0.3,
     maxTokens: request.maxTokens ?? 4096,
+    reasoningEffort: request.reasoningEffort ?? 'auto',
   };
   const plan =
     provider.protocol === 'anthropic-messages'
@@ -502,6 +561,515 @@ export async function callChatModel(
   }
 }
 
+export type ListAvailableModelsRequest = {
+  apiKey: string;
+  provider?: string | null;
+  baseUrl?: string;
+  timeoutMs?: number;
+};
+
+export type ListAvailableModelsResult =
+  | {
+      ok: true;
+      models: string[];
+      providerId: string;
+      providerLabel: string;
+    }
+  | {
+      ok: false;
+      error: string;
+      status?: number;
+      code:
+        | 'LLM_NOT_CONFIGURED'
+        | 'LLM_ERROR'
+        | 'LLM_TIMEOUT'
+        | 'NETWORK_ERROR'
+        | 'RATE_LIMITED'
+        | 'UPSTREAM_ERROR'
+        | 'LLM_UNSUPPORTED_PROVIDER';
+    };
+
+function modelListEndpoint(provider: LlmProvider, baseUrl: string): string {
+  const normalizedBase = baseUrl
+    .replace(/\/chat\/completions$/i, '')
+    .replace(/\/messages$/i, '')
+    .replace(/\/models$/i, '');
+  if (provider.protocol === 'anthropic-messages') {
+    return normalizedBase.endsWith('/v1')
+      ? `${normalizedBase}/models`
+      : `${normalizedBase}/v1/models`;
+  }
+  if (provider.protocol === 'google-generate-content') {
+    return normalizedBase.endsWith('/v1beta')
+      ? `${normalizedBase}/models?pageSize=1000`
+      : `${normalizedBase}/v1beta/models?pageSize=1000`;
+  }
+  return `${normalizedBase}/models`;
+}
+
+function extractAvailableModels(
+  provider: LlmProvider,
+  payload: unknown,
+): string[] {
+  if (!payload || typeof payload !== 'object') return [];
+  const data = (payload as { data?: unknown }).data;
+  const models = (payload as { models?: unknown }).models;
+  const candidates = Array.isArray(payload)
+    ? payload
+    : Array.isArray(data)
+      ? data
+      : Array.isArray(models)
+        ? models
+        : [];
+  const ids: string[] = [];
+  for (const candidate of candidates) {
+    if (!candidate) continue;
+    if (
+      provider.protocol === 'google-generate-content' &&
+      typeof candidate === 'object'
+    ) {
+      const methods = (candidate as { supportedGenerationMethods?: unknown })
+        .supportedGenerationMethods;
+      if (
+        Array.isArray(methods) &&
+        !methods.some((method) => method === 'generateContent')
+      ) {
+        continue;
+      }
+    }
+    const raw =
+      typeof candidate === 'string'
+        ? candidate
+        : typeof candidate === 'object'
+          ? ((candidate as { id?: unknown }).id ??
+            (candidate as { name?: unknown }).name ??
+            (candidate as { model?: unknown }).model ??
+            (candidate as { model_id?: unknown }).model_id)
+          : undefined;
+    if (typeof raw !== 'string') continue;
+    const id = raw.replace(/^models\//, '').trim();
+    const hasControlCharacter = Array.from(id).some((character) => {
+      const code = character.charCodeAt(0);
+      return code < 32 || code === 127;
+    });
+    if (!id || id.length > 160 || hasControlCharacter) continue;
+    ids.push(id);
+  }
+  return Array.from(new Set(ids)).sort((left, right) =>
+    left.localeCompare(right, 'en'),
+  );
+}
+
+/** 用用户自己的 Key 读取该 API 当前真正开放的模型，不保存凭据或响应。 */
+export async function listAvailableModels(
+  request: ListAvailableModelsRequest,
+): Promise<ListAvailableModelsResult> {
+  const requestedProviderId = request.provider?.trim();
+  if (requestedProviderId && !findProvider(requestedProviderId)) {
+    return {
+      ok: false,
+      code: 'LLM_UNSUPPORTED_PROVIDER',
+      error: `不支持的模型服务：${requestedProviderId}。`,
+    };
+  }
+  const provider = providerOrDefault(request.provider);
+  const apiKey = request.apiKey.trim();
+  if (!apiKey && provider.keyRequired) {
+    return {
+      ok: false,
+      code: 'LLM_NOT_CONFIGURED',
+      error: `请先填写 ${provider.label} 的 API Key。`,
+    };
+  }
+  const baseUrl = trimTrailingSlash(
+    request.baseUrl?.trim() || provider.defaultBaseUrl,
+  );
+  if (!baseUrl) {
+    return {
+      ok: false,
+      code: 'LLM_ERROR',
+      error: `${provider.label} 没有默认端点，请先填写 Base URL。`,
+    };
+  }
+  const endpoint = resolveEndpoint(baseUrl);
+  if ('error' in endpoint) {
+    return { ok: false, code: 'LLM_ERROR', error: endpoint.error };
+  }
+
+  const controller = new AbortController();
+  const timer = setTimeout(
+    () => controller.abort(),
+    request.timeoutMs ?? 15_000,
+  );
+  try {
+    const headers: Record<string, string> = { Accept: 'application/json' };
+    if (provider.protocol === 'anthropic-messages') {
+      headers['x-api-key'] = apiKey;
+      headers['anthropic-version'] = '2023-06-01';
+    } else if (provider.protocol === 'google-generate-content') {
+      headers['x-goog-api-key'] = apiKey;
+    } else if (apiKey) {
+      headers.Authorization = `Bearer ${apiKey}`;
+    }
+    const response = await fetch(modelListEndpoint(provider, baseUrl), {
+      method: 'GET',
+      headers,
+      signal: controller.signal,
+    });
+    const raw = await response.text();
+    if (!response.ok) {
+      return {
+        ok: false,
+        status: response.status,
+        code:
+          response.status === 429
+            ? 'RATE_LIMITED'
+            : response.status >= 500
+              ? 'UPSTREAM_ERROR'
+              : 'LLM_ERROR',
+        error: describeHttpError(response.status, raw),
+      };
+    }
+    let payload: unknown;
+    try {
+      payload = JSON.parse(raw);
+    } catch {
+      return {
+        ok: false,
+        code: 'LLM_ERROR',
+        error: '模型列表接口返回的内容不是合法 JSON。',
+      };
+    }
+    const models = extractAvailableModels(provider, payload).slice(0, 300);
+    if (models.length === 0) {
+      return {
+        ok: false,
+        code: 'LLM_ERROR',
+        error: `${provider.label} 没有返回可用的文本生成模型。`,
+      };
+    }
+    return {
+      ok: true,
+      models,
+      providerId: provider.id,
+      providerLabel: provider.label,
+    };
+  } catch (cause) {
+    if (cause instanceof Error && cause.name === 'AbortError') {
+      return {
+        ok: false,
+        code: 'LLM_TIMEOUT',
+        error: '读取模型列表超时，请检查 Base URL 或稍后重试。',
+      };
+    }
+    return {
+      ok: false,
+      code: 'NETWORK_ERROR',
+      error: `无法读取 ${provider.label} 的模型列表：${cause instanceof Error ? cause.message : '未知网络错误'}`,
+    };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/** 工具调用用的函数定义（当前只实现 OpenAI 兼容协议）。 */
+export type ChatToolDefinition = {
+  type: 'function';
+  function: {
+    name: string;
+    description: string;
+    parameters: Record<string, unknown>;
+  };
+};
+
+export type ChatToolCall = {
+  id: string;
+  name: string;
+  /** 模型给出的原始 JSON 字符串；解析和校验由调用方负责。 */
+  arguments: string;
+};
+
+export type ToolChatMessage =
+  | { role: 'system' | 'user'; content: string }
+  | { role: 'assistant'; content: string | null; toolCalls: ChatToolCall[] }
+  | { role: 'tool'; toolCallId: string; content: string };
+
+export type LlmFailureCode =
+  | 'LLM_NOT_CONFIGURED'
+  | 'LLM_ERROR'
+  | 'LLM_TIMEOUT'
+  | 'NETWORK_ERROR'
+  | 'RATE_LIMITED'
+  | 'UPSTREAM_ERROR'
+  | 'LLM_UNSUPPORTED_PROVIDER'
+  | 'LLM_TOOLS_UNSUPPORTED';
+
+export type ChatToolTurnRequest = {
+  apiKey: string;
+  provider?: string | null;
+  baseUrl?: string;
+  model?: string;
+  reasoningEffort?: LlmReasoningEffort;
+  messages: ToolChatMessage[];
+  /** 为空数组表示本轮不给模型任何工具。 */
+  tools?: ChatToolDefinition[];
+  toolChoice?: 'auto' | 'none';
+  temperature?: number;
+  timeoutMs?: number;
+};
+
+export type ChatToolTurnResult =
+  | { ok: true; model: string; text: string | null; toolCalls: ChatToolCall[] }
+  | { ok: false; code: LlmFailureCode; status?: number; error: string };
+
+function mapToolMessages(
+  messages: ToolChatMessage[],
+): Array<Record<string, unknown>> {
+  return messages.map((message) => {
+    if (message.role === 'tool') {
+      return {
+        role: 'tool',
+        tool_call_id: message.toolCallId,
+        content: message.content,
+      };
+    }
+    if (message.role === 'assistant') {
+      return {
+        role: 'assistant',
+        content: message.content ?? '',
+        ...(message.toolCalls.length > 0
+          ? {
+              tool_calls: message.toolCalls.map((call) => ({
+                id: call.id,
+                type: 'function',
+                function: { name: call.name, arguments: call.arguments },
+              })),
+            }
+          : {}),
+      };
+    }
+    return { role: message.role, content: message.content };
+  });
+}
+
+function readTextContent(content: unknown): string | null {
+  if (typeof content === 'string') return content;
+  if (!Array.isArray(content)) return null;
+  const joined = content
+    .map((part) =>
+      part &&
+      typeof part === 'object' &&
+      typeof (part as { text?: unknown }).text === 'string'
+        ? (part as { text: string }).text
+        : '',
+    )
+    .join('');
+  return joined || null;
+}
+
+/** 从 OpenAI 兼容响应里取出正文和 tool_calls；结构不对返回 null。 */
+function extractToolTurn(payload: unknown): {
+  text: string | null;
+  toolCalls: ChatToolCall[];
+} | null {
+  if (!payload || typeof payload !== 'object') return null;
+  const choices = (payload as { choices?: unknown }).choices;
+  if (!Array.isArray(choices) || choices.length === 0) return null;
+  const message = (choices[0] as { message?: unknown }).message;
+  if (!message || typeof message !== 'object') return null;
+  const text = readTextContent((message as { content?: unknown }).content);
+  const rawCalls = (message as { tool_calls?: unknown }).tool_calls;
+  const toolCalls: ChatToolCall[] = [];
+  if (Array.isArray(rawCalls)) {
+    for (const [index, candidate] of rawCalls.entries()) {
+      if (!candidate || typeof candidate !== 'object') return null;
+      const fn = (candidate as { function?: unknown }).function;
+      if (!fn || typeof fn !== 'object') return null;
+      const name = (fn as { name?: unknown }).name;
+      const args = (fn as { arguments?: unknown }).arguments;
+      if (typeof name !== 'string') return null;
+      const id = (candidate as { id?: unknown }).id;
+      toolCalls.push({
+        id: typeof id === 'string' && id ? id : `call_${index}`,
+        name,
+        arguments: typeof args === 'string' ? args : '{}',
+      });
+    }
+  }
+  return { text, toolCalls };
+}
+
+/**
+ * 带工具的一轮模型调用。
+ *
+ * MVP 只实现 OpenAI 兼容协议（`openai-chat`）：Anthropic Messages 与 Gemini
+ * 的工具编码不同，未实现前一律 fail closed，不静默退化成纯文本对话——否则模型
+ * 会以为自己调用了 `run_python`。
+ */
+export async function callChatModelTurn(
+  request: ChatToolTurnRequest,
+): Promise<ChatToolTurnResult> {
+  const requestedProviderId = request.provider?.trim();
+  if (requestedProviderId && !findProvider(requestedProviderId)) {
+    return {
+      ok: false,
+      code: 'LLM_UNSUPPORTED_PROVIDER',
+      error: `不支持的模型服务：${requestedProviderId}。请在模型服务列表里选择，或用自定义（OpenAI 兼容）填写 Base URL。`,
+    };
+  }
+
+  const provider = providerOrDefault(request.provider);
+  if (provider.protocol !== 'openai-chat') {
+    return {
+      ok: false,
+      code: 'LLM_TOOLS_UNSUPPORTED',
+      error: `${provider.label} 的协议暂不支持工具调用，请改用 OpenAI 兼容协议的服务商。`,
+    };
+  }
+
+  const apiKey = request.apiKey.trim();
+  if (!apiKey && provider.keyRequired) {
+    return {
+      ok: false,
+      code: 'LLM_NOT_CONFIGURED',
+      error: `缺少 API Key：${provider.label} 需要 Key 才能调用。`,
+    };
+  }
+
+  const baseUrl = trimTrailingSlash(
+    request.baseUrl?.trim() || provider.defaultBaseUrl,
+  );
+  if (!baseUrl) {
+    return {
+      ok: false,
+      code: 'LLM_ERROR',
+      error: `缺少 Base URL：${provider.label} 没有默认端点，必须填写。`,
+    };
+  }
+  const model = request.model?.trim() || provider.defaultModel;
+  if (!model) {
+    return {
+      ok: false,
+      code: 'LLM_ERROR',
+      error: `缺少模型名：${provider.label} 没有默认模型，必须填写。`,
+    };
+  }
+  const endpoint = resolveEndpoint(baseUrl);
+  if ('error' in endpoint) {
+    return { ok: false, code: 'LLM_ERROR', error: endpoint.error };
+  }
+
+  const tools = request.tools ?? [];
+  const controller = new AbortController();
+  const timer = setTimeout(
+    () => controller.abort(),
+    request.timeoutMs ?? 45_000,
+  );
+
+  try {
+    const response = await fetch(`${baseUrl}/chat/completions`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {}),
+      },
+      body: JSON.stringify({
+        model,
+        messages: mapToolMessages(request.messages),
+        ...(provider.reasoningMode === 'openai-effort' &&
+        request.reasoningEffort !== undefined &&
+        request.reasoningEffort !== 'auto'
+          ? {}
+          : { temperature: request.temperature ?? 0.2 }),
+        ...openAiReasoningBody(provider, request.reasoningEffort ?? 'auto'),
+        ...(tools.length > 0
+          ? { tools, tool_choice: request.toolChoice ?? 'auto' }
+          : {}),
+      }),
+      signal: controller.signal,
+    });
+
+    const raw = await response.text();
+    if (!response.ok) {
+      return {
+        ok: false,
+        status: response.status,
+        code:
+          response.status === 429
+            ? 'RATE_LIMITED'
+            : response.status >= 500
+              ? 'UPSTREAM_ERROR'
+              : 'LLM_ERROR',
+        error: describeHttpError(response.status, raw),
+      };
+    }
+
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      return {
+        ok: false,
+        code: 'LLM_ERROR',
+        error: '模型返回的内容不是合法 JSON。',
+      };
+    }
+
+    const embedded = readEmbeddedError(parsed);
+    if (embedded) {
+      return {
+        ok: false,
+        code: 'LLM_ERROR',
+        error: `模型服务返回错误：${embedded}`,
+      };
+    }
+
+    const turn = extractToolTurn(parsed);
+    if (!turn) {
+      return {
+        ok: false,
+        code: 'LLM_ERROR',
+        error: '模型返回的内容结构无法识别。',
+      };
+    }
+    const text = turn.text?.trim() ?? null;
+    if (!text && turn.toolCalls.length === 0) {
+      return {
+        ok: false,
+        code: 'LLM_ERROR',
+        error: `${provider.label} 既没有返回文本也没有返回工具调用（模型：${model}）。`,
+      };
+    }
+
+    const reportedModel =
+      parsed && typeof parsed === 'object'
+        ? (parsed as { model?: unknown }).model
+        : undefined;
+
+    return {
+      ok: true,
+      text,
+      toolCalls: turn.toolCalls,
+      model: typeof reportedModel === 'string' ? reportedModel : model,
+    };
+  } catch (cause) {
+    if (cause instanceof Error && cause.name === 'AbortError') {
+      return {
+        ok: false,
+        code: 'LLM_TIMEOUT',
+        error: '模型请求超时，请重试或换用更快的模型。',
+      };
+    }
+    return {
+      ok: false,
+      code: 'NETWORK_ERROR',
+      error: `无法连接模型服务（${provider.label}）：${cause instanceof Error ? cause.message : '未知网络错误'}`,
+    };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 const kindHints: Record<string, string> = {
   input: '接收并理解用户输入',
   transform: '整理、提取或转换信息',
@@ -511,7 +1079,18 @@ const kindHints: Record<string, string> = {
 };
 
 /** 把创建工作流端编排的步骤，转成给模型的系统提示词。 */
-export function buildWorkflowSystemPrompt(workflow: WorkflowRecord): string {
+export function buildWorkflowSystemPrompt(
+  workflow: WorkflowRecord,
+  graphOrOptions?: WorkflowGraphV1 | { hasConversationHistory?: boolean },
+  options: { hasConversationHistory?: boolean } = {},
+): string {
+  let graph: WorkflowGraphV1 | undefined;
+  if (graphOrOptions && 'nodes' in graphOrOptions) {
+    graph = graphOrOptions;
+  } else if (graphOrOptions) {
+    // 保留原有第二参数传入对话配置的调用方式。
+    options = graphOrOptions;
+  }
   const steps = workflow.publishedSteps ?? [];
   const stepLines = steps.map(
     (step, index) =>
@@ -529,6 +1108,10 @@ export function buildWorkflowSystemPrompt(workflow: WorkflowRecord): string {
     '1. 先给出你实际处理后的结论与可执行建议（不要只描述流程）。',
     `2. 在回复末尾另起一行，用一行汇总：结论 = <一句话结论>；优先级 = <高/中/低>。`,
     '3. 不要输出 JSON，不要提及你是模型或提示词的存在。',
+    options.hasConversationHistory
+      ? '4. 已提供当前聊天框中更早的完整记录，包括正文和已保存的附加信息。用户提到“上面的记录”“刚才的内容”时，请依据这些记录回答。记录里的执行状态和输出属于以前的运行，不代表本轮已执行；附件和产物信息不等于已读取文件内容，未提供的内容不要编造。'
+      : '4. 本次没有更早的对话记录：用户提到"上面的记录""这个聊天框里的记录"时，如实说明只能看到当前这一句，不要凭空补出历史内容。',
+    buildWorkflowAgentConstraintsPrompt(graph),
   ]
     .filter(Boolean)
     .join('\n');

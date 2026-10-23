@@ -3,6 +3,7 @@ import type {
   WorkflowGraphV1,
 } from '@/lib/workflow-graph/types';
 import { studioNodeTypes } from '@/lib/workflow-graph/types';
+import { validateAgentConstraints } from '@/lib/workflow-graph/agent-constraints';
 
 /** Graph 草稿的请求体上限；100 个节点的正常草稿远小于它。 */
 export const GRAPH_JSON_LIMIT_BYTES = 512 * 1024;
@@ -54,7 +55,9 @@ function isNode(value: unknown): boolean {
     typeof position.y === 'number' &&
     Array.isArray(value.ports) &&
     value.ports.every(isPort) &&
-    isPlainObject(value.config)
+    isPlainObject(value.config) &&
+    (value.type !== 'aiAgent' ||
+      validateAgentConstraints(value.config.constraints) === null)
   );
 }
 

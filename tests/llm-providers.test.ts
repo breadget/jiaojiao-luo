@@ -25,8 +25,10 @@ import {
 } from '@/lib/llm/providers';
 import {
   callChatModel,
+  callChatModelTurn,
   DEFAULT_LLM_BASE_URL,
   DEFAULT_LLM_MODEL,
+  listAvailableModels,
   resolveLlmSelection,
 } from '@/lib/server/llm';
 import { installDatabaseMock, nextAddress, seedWorkflow } from './helpers/api';
@@ -108,7 +110,12 @@ async function handleUpstream(
     (request.headers['x-goog-api-key'] as string | undefined) ??
     '';
   const key = keyHeader.replace(/^Bearer\s+/i, '');
-  upstreamCalls.push({ path: request.url ?? '', url, headers: request.headers, body });
+  upstreamCalls.push({
+    path: request.url ?? '',
+    url,
+    headers: request.headers,
+    body,
+  });
 
   if (key === 'key-401') {
     sendJson(response, 401, { error: { message: 'invalid key' } });
@@ -128,7 +135,42 @@ async function handleUpstream(
     return;
   }
   if (key === 'key-embedded-error') {
-    sendJson(response, 200, { error: { message: 'quota for this model is 0' } });
+    sendJson(response, 200, {
+      error: { message: 'quota for this model is 0' },
+    });
+    return;
+  }
+  if (url.pathname.endsWith('/models')) {
+    if (url.pathname === '/mixed-models/v1/models') {
+      sendJson(response, 200, {
+        models: ['model-z', { model: 'model-a' }, { model_id: 'model-b' }],
+      });
+      return;
+    }
+    if (request.headers['x-goog-api-key']) {
+      sendJson(response, 200, {
+        models: [
+          {
+            name: 'models/gemini-2.5-pro',
+            supportedGenerationMethods: ['generateContent'],
+          },
+          {
+            name: 'models/text-embedding-004',
+            supportedGenerationMethods: ['embedContent'],
+          },
+        ],
+      });
+      return;
+    }
+    if (request.headers['x-api-key']) {
+      sendJson(response, 200, {
+        data: [{ id: 'claude-sonnet-4-5' }, { id: 'claude-opus-4-1' }],
+      });
+      return;
+    }
+    sendJson(response, 200, {
+      data: [{ id: 'gpt-4.1' }, { id: 'gpt-4o-mini' }, { id: 'gpt-4.1' }],
+    });
     return;
   }
   if (url.pathname.endsWith(':generateContent')) {
@@ -152,11 +194,15 @@ async function handleUpstream(
     sendJson(response, 200, {
       id: 'cmpl_1',
       model: body.model ?? 'unknown',
-      choices: [{ message: { role: 'assistant', content: '来自兼容端点的回答' } }],
+      choices: [
+        { message: { role: 'assistant', content: '来自兼容端点的回答' } },
+      ],
     });
     return;
   }
-  sendJson(response, 404, { error: { message: `unexpected path ${url.pathname}` } });
+  sendJson(response, 404, {
+    error: { message: `unexpected path ${url.pathname}` },
+  });
 }
 
 describe('模型服务注册表', () => {
@@ -167,12 +213,17 @@ describe('模型服务注册表', () => {
 
     for (const provider of llmProviders) {
       assert.ok(
-        ['openai-chat', 'anthropic-messages', 'google-generate-content'].includes(
-          provider.protocol,
-        ),
+        [
+          'openai-chat',
+          'anthropic-messages',
+          'google-generate-content',
+        ].includes(provider.protocol),
         `${provider.id} 的协议不支持`,
       );
-      for (const value of [provider.defaultBaseUrl, provider.openAiCompatibleBaseUrl]) {
+      for (const value of [
+        provider.defaultBaseUrl,
+        provider.openAiCompatibleBaseUrl,
+      ]) {
         if (!value) continue;
         const url = new URL(value);
         const local = ['127.0.0.1', 'localhost', '::1'].includes(url.hostname);
@@ -213,7 +264,10 @@ describe('模型服务注册表', () => {
     const options = providerOptions();
     assert.equal(options.length, llmProviders.length);
     for (const option of options) {
-      assert.deepEqual(Object.keys(option).filter((key) => /key|token|secret/i.test(key)), ['keyRequired', 'keyHint']);
+      assert.deepEqual(
+        Object.keys(option).filter((key) => /key|token|secret/i.test(key)),
+        ['keyRequired', 'keyHint'],
+      );
     }
   });
 
@@ -257,7 +311,10 @@ describe('resolveLlmSelection', () => {
       model: 'my-model',
     });
     assert.equal(filled.ok, true);
-    assert.equal(filled.ok && filled.selection.baseUrl, 'https://gateway.example.com/v1');
+    assert.equal(
+      filled.ok && filled.selection.baseUrl,
+      'https://gateway.example.com/v1',
+    );
     assert.equal(filled.ok && filled.selection.model, 'my-model');
   });
 
@@ -437,6 +494,187 @@ describe('callChatModel · 多家协议', () => {
     assert.equal(call?.headers.authorization, undefined);
     assert.equal(call?.url.pathname, '/v1/chat/completions');
   });
+
+  it('把推理强度按不同厂商协议映射，model-only 服务不伪造参数', async () => {
+    upstreamCalls = [];
+    await callChatModel({
+      provider: 'openai',
+      apiKey: 'key-openai',
+      baseUrl: `${serverOrigin}/v1`,
+      model: 'o3',
+      reasoningEffort: 'high',
+      messages: [{ role: 'user', content: 'hi' }],
+    });
+    assert.equal(upstreamCalls.at(-1)?.body.reasoning_effort, 'high');
+    assert.equal(upstreamCalls.at(-1)?.body.temperature, undefined);
+
+    await callChatModel({
+      provider: 'qwen',
+      apiKey: 'key-qwen',
+      baseUrl: `${serverOrigin}/v1`,
+      model: 'qwen-plus',
+      reasoningEffort: 'medium',
+      messages: [{ role: 'user', content: 'hi' }],
+    });
+    assert.equal(upstreamCalls.at(-1)?.body.enable_thinking, true);
+    assert.equal(upstreamCalls.at(-1)?.body.thinking_budget, 8192);
+
+    await callChatModel({
+      provider: 'anthropic',
+      apiKey: 'key-anthropic',
+      baseUrl: serverOrigin,
+      model: 'claude-sonnet-4-5',
+      reasoningEffort: 'low',
+      messages: [{ role: 'user', content: 'hi' }],
+    });
+    assert.deepEqual(upstreamCalls.at(-1)?.body.thinking, {
+      type: 'enabled',
+      budget_tokens: 2048,
+    });
+    assert.equal(upstreamCalls.at(-1)?.body.temperature, undefined);
+
+    await callChatModel({
+      provider: 'gemini',
+      apiKey: 'key-gemini',
+      baseUrl: serverOrigin,
+      model: 'gemini-2.5-pro',
+      reasoningEffort: 'high',
+      messages: [{ role: 'user', content: 'hi' }],
+    });
+    const generationConfig = upstreamCalls.at(-1)?.body.generationConfig;
+    assert.ok(generationConfig && typeof generationConfig === 'object');
+    assert.deepEqual((generationConfig as JsonRecord).thinkingConfig, {
+      thinkingBudget: 24576,
+    });
+
+    await callChatModel({
+      provider: 'deepseek',
+      apiKey: 'key-deepseek',
+      baseUrl: `${serverOrigin}/v1`,
+      model: 'deepseek-reasoner',
+      reasoningEffort: 'high',
+      messages: [{ role: 'user', content: 'hi' }],
+    });
+    assert.equal(upstreamCalls.at(-1)?.body.reasoning_effort, undefined);
+    assert.equal(upstreamCalls.at(-1)?.body.thinking_budget, undefined);
+  });
+
+  it('工具调用也带上兼容协议的推理强度', async () => {
+    upstreamCalls = [];
+    const result = await callChatModelTurn({
+      provider: 'openai',
+      apiKey: 'key-openai',
+      baseUrl: `${serverOrigin}/v1`,
+      model: 'o3',
+      reasoningEffort: 'low',
+      messages: [{ role: 'user', content: 'hi' }],
+    });
+    assert.equal(result.ok, true);
+    assert.equal(upstreamCalls.at(-1)?.body.reasoning_effort, 'low');
+  });
+});
+
+describe('listAvailableModels · API 模型识别', () => {
+  it('识别 OpenAI 兼容模型并去重排序', async () => {
+    upstreamCalls = [];
+    const result = await listAvailableModels({
+      provider: 'openai',
+      apiKey: 'key-openai',
+      baseUrl: `${serverOrigin}/v1`,
+    });
+    assert.equal(result.ok, true);
+    assert.deepEqual(result.ok && result.models, ['gpt-4.1', 'gpt-4o-mini']);
+    assert.equal(
+      upstreamCalls.at(-1)?.headers.authorization,
+      'Bearer key-openai',
+    );
+  });
+
+  it('兼容字符串模型列表、model 字段与已经带 /models 的地址', async () => {
+    upstreamCalls = [];
+    const result = await listAvailableModels({
+      provider: 'custom',
+      apiKey: 'key-custom',
+      baseUrl: `${serverOrigin}/mixed-models/v1/models`,
+    });
+    assert.equal(result.ok, true);
+    assert.deepEqual(result.ok && result.models, [
+      'model-a',
+      'model-b',
+      'model-z',
+    ]);
+    assert.equal(upstreamCalls.at(-1)?.url.pathname, '/mixed-models/v1/models');
+  });
+
+  it('识别 Anthropic 与 Gemini，并过滤 Gemini 的非生成模型', async () => {
+    const anthropic = await listAvailableModels({
+      provider: 'anthropic',
+      apiKey: 'key-anthropic',
+      baseUrl: serverOrigin,
+    });
+    assert.equal(anthropic.ok, true);
+    assert.deepEqual(anthropic.ok && anthropic.models, [
+      'claude-opus-4-1',
+      'claude-sonnet-4-5',
+    ]);
+
+    const gemini = await listAvailableModels({
+      provider: 'gemini',
+      apiKey: 'key-gemini',
+      baseUrl: serverOrigin,
+    });
+    assert.equal(gemini.ok, true);
+    assert.deepEqual(gemini.ok && gemini.models, ['gemini-2.5-pro']);
+  });
+
+  it('缺 Key 与不安全地址在发请求前失败', async () => {
+    upstreamCalls = [];
+    const noKey = await listAvailableModels({
+      provider: 'openai',
+      apiKey: '',
+    });
+    assert.equal(noKey.ok, false);
+    assert.equal(!noKey.ok && noKey.code, 'LLM_NOT_CONFIGURED');
+    const insecure = await listAvailableModels({
+      provider: 'custom',
+      apiKey: 'key',
+      baseUrl: 'http://example.com/v1',
+    });
+    assert.equal(insecure.ok, false);
+    assert.equal(upstreamCalls.length, 0);
+  });
+});
+
+describe('POST /api/llm/models · 模型识别入口', () => {
+  type ModelsRoute = typeof import('@/app/api/llm/models/route');
+  let route!: ModelsRoute;
+
+  before(async () => {
+    route = await import('@/app/api/llm/models/route');
+  });
+
+  it('只回传模型元数据，不回显 API Key，并禁止缓存', async () => {
+    const response = await route.POST(
+      new Request('http://urtoris.test/api/llm/models', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Origin: 'http://urtoris.test',
+          'X-Real-IP': nextAddress(),
+        },
+        body: JSON.stringify({
+          provider: 'openai',
+          apiKey: 'key-model-route',
+          baseUrl: `${serverOrigin}/v1`,
+        }),
+      }),
+    );
+    const body = (await response.json()) as JsonRecord;
+    assert.equal(response.status, 200);
+    assert.deepEqual(body.models, ['gpt-4.1', 'gpt-4o-mini']);
+    assert.equal(JSON.stringify(body).includes('key-model-route'), false);
+    assert.equal(response.headers.get('Cache-Control'), 'no-store');
+  });
 });
 
 describe('POST /api/agent/chat · 服务选择', () => {
@@ -458,7 +696,10 @@ describe('POST /api/agent/chat · 服务选择', () => {
   }
 
   before(async () => {
-    resetEnv({ N8N_BASE_URL: serverOrigin, N8N_WEBHOOK_TOKEN: 'test-n8n-token' });
+    resetEnv({
+      N8N_BASE_URL: serverOrigin,
+      N8N_WEBHOOK_TOKEN: 'test-n8n-token',
+    });
     await seedWorkflow(database.d1, {
       id: DIRECT_WORKFLOW_ID,
       name: '服务选择直连',
@@ -525,6 +766,21 @@ describe('POST /api/agent/chat · 服务选择', () => {
     const body = (await response.json()) as JsonRecord;
     assert.equal(response.status, 400);
     assert.match(String(body.error), /Base URL/);
+    assert.equal(upstreamCalls.length, 0);
+  });
+
+  it('拒绝未知的推理强度，不向上游发请求', async () => {
+    upstreamCalls = [];
+    const response = await postChat({
+      workflowId: DIRECT_WORKFLOW_ID,
+      message: '使用非法推理参数',
+      provider: 'openai',
+      apiKey: 'key-openai',
+      baseUrl: `${serverOrigin}/v1`,
+      model: 'o3',
+      reasoningEffort: 'extreme',
+    });
+    assert.equal(response.status, 400);
     assert.equal(upstreamCalls.length, 0);
   });
 });

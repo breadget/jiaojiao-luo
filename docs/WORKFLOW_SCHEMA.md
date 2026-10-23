@@ -233,6 +233,8 @@ type TriggerConfig = {
 type AiAgentConfig = {
   strategy: 'tools';
   instructions: string;
+  /** 每个 Agent 单独配置的自然语言行为限制；空字符串或省略表示未设置。 */
+  constraints?: string;
   maxIterations: number;
   timeoutMs: number;
   outputSchema?: JsonSchema;
@@ -242,6 +244,10 @@ type AiAgentConfig = {
 ```
 
 `maxIterations` 建议 1–12；`fallbackPolicy=rules` 时必须能在响应中明确写 `mode=rules, degraded=true`。
+
+`constraints` 最多 4000 个字符，可在画布中选中 AI Agent 后，在 Inspector 的「行为限制」中填写，例如「只允许查询订单，不得修改或删除数据」。它与任务指令分开保存，随 Graph 草稿及发布快照保留；辅助 Agent 也可通过自然语言请求生成或修改这个字段。
+
+Adapter 将任务指令和行为限制合并到该 Agent 的 n8n `options.systemMessage` 中；使用端直连模型、Python 文件任务和本机工具任务只加载当前已发布 Graph 中各 Agent 的限制，未发布的草稿修改及客户端传入的限制不会影响运行。含有限制的工作流必须通过真实模型或已部署的工作流执行，模拟入口会返回 `AGENT_CONSTRAINTS_REQUIRE_MODEL`；配置 `credentialRef=none` 的规则备援也不能编译带有限制的 Agent。自然语言限制通过系统提示词影响模型行为，不提供工具层的权限隔离；读写白名单、审批和敏感操作拦截仍需由实际工具实现。n8n 执行需部署包含这些限制的新编译版本。
 
 ### LLM Model
 

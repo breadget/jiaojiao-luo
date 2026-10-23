@@ -3,6 +3,7 @@ import type {
   WorkflowGraphV1,
   WorkflowPort,
 } from '@/lib/workflow-graph/types';
+import { validateAgentConstraints } from '@/lib/workflow-graph/agent-constraints';
 
 export type GraphIssue = {
   level: 'error' | 'warning';
@@ -196,6 +197,16 @@ export function validateGraph(graph: WorkflowGraphV1): GraphIssue[] {
     }
 
     if (node.type === 'aiAgent') {
+      const constraintsError = validateAgentConstraints(
+        node.config.constraints,
+      );
+      if (constraintsError) {
+        issues.push({
+          level: 'error',
+          message: constraintsError,
+          nodeId: node.id,
+        });
+      }
       if (!hasConnection(graph, node.id, 'resource.model')) {
         issues.push({
           level: 'error',

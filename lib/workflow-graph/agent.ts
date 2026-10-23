@@ -22,6 +22,7 @@ import {
   type GraphIssue,
 } from '@/lib/workflow-graph/validate';
 import { randomId } from '@/lib/random-id';
+import { AGENT_CONSTRAINTS_MAX_LENGTH } from '@/lib/workflow-graph/agent-constraints';
 
 export type WorkflowAgentMode = 'create' | 'edit';
 
@@ -107,6 +108,11 @@ const configRules: Partial<Record<StudioNodeType, Record<string, ConfigRule>>> =
     aiAgent: {
       strategy: { kind: 'string', max: 32, values: ['tools'] },
       instructions: { kind: 'string', max: 4_000 },
+      constraints: {
+        kind: 'string',
+        max: AGENT_CONSTRAINTS_MAX_LENGTH,
+        allowEmpty: true,
+      },
       prompt: { kind: 'string', max: 800 },
       maxIterations: { kind: 'integer', min: 1, max: 50 },
       fallbackPolicy: {
@@ -660,6 +666,7 @@ export function buildWorkflowAgentMessages(input: {
     'Adapter 会在 Trigger 后展平 Webhook body，业务节点可直接读取 $json.requestId、$json.sessionId、$json.message、$json.question、$json.channel 和 $json.urgency。',
     'memory.config.sessionKey 只写安全字段路径（通常是 sessionId），不要写 n8n 表达式或节点名。',
     'aiAgent.config.fallbackPolicy 默认选 error；除非图里确实实现了规则备援链路，不要选 rules。',
+    '用户要求限制 Agent 的行为、权限或回答范围时，写入对应 aiAgent.config.constraints，使用自然语言，最多 4000 字符；instructions 描述任务职责。保留用户未要求更改的现有限制，只有用户明确要求移除限制时才将 constraints 设为空字符串。',
     '输出结构：{"schemaVersion":1,"summary":"一句话说明变更","name":"2-80 字符","description":"0-500 字符","nodes":[{"key":"稳定标识","type":"节点类型","name":"节点名","description":"节点用途","config":{},"position":{"x":0,"y":0},"disabled":false}],"connections":[{"sourceKey":"...","sourcePort":"...","targetKey":"...","targetPort":"..."}]}',
     `端口与允许配置目录：${JSON.stringify(portCatalog)}`,
   ].join('\n');

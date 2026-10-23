@@ -70,6 +70,7 @@ export const nodeRegistry: Record<StudioNodeType, NodeDefinition> = {
     config: {
       strategy: 'tools',
       instructions: '理解请求，必要时调用工具，并返回结构化结果。',
+      constraints: '',
       /** n8n 表达式体；Adapter 编译时包成 ={{ ... }} 作为 Agent 的用户提示词。 */
       prompt: '$json.message',
       maxIterations: 6,
@@ -80,7 +81,7 @@ export const nodeRegistry: Record<StudioNodeType, NodeDefinition> = {
   llmModel: {
     type: 'llmModel',
     category: 'Resources',
-    label: 'Qwen Model',
+    label: '模型',
     description:
       '可选的模型服务：通义千问 / OpenAI / DeepSeek / Kimi / GLM / Claude / Gemini / 本机 Ollama / 自定义 OpenAI 兼容端点',
     capability: 'model.chat',

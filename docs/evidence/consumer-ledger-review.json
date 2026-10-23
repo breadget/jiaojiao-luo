@@ -1,0 +1,140 @@
+{
+  "scope": "使用端值班簿（/）收尾评审：本地 vinext dev + 本机 headless Chrome（CDP）实测排版、模态与键盘行为、模拟运行闭环",
+  "complete": true,
+  "branch": "codex/python-agent-deploy",
+  "baseline": "3e01d18285ae66860f1f66d0c0838b417eb93cbd",
+  "generatedAt": "2026-09-14T14:32:00.000Z",
+  "surface": {
+    "route": "/",
+    "entry": "身份门厅 → 使用工作流端",
+    "world": "值班交接簿（ledger）",
+    "directionContract": "components/workflow-lab.tsx 顶部 THESIS/OWN-WORLD/STORY/FIRST VIEWPORT/FORM/FINISH"
+  },
+  "checks": [
+    {
+      "id": "lint",
+      "command": "npm run lint",
+      "result": "通过（oxlint 无输出）"
+    },
+    {
+      "id": "tests",
+      "command": "npm test",
+      "result": "366 条：364 通过 / 2 跳过 / 0 失败",
+      "durationMs": 4718
+    },
+    {
+      "id": "build",
+      "command": "npm run build",
+      "result": "通过（vinext build complete）"
+    },
+    {
+      "id": "format",
+      "command": "npm run format -- --check",
+      "result": "仓库范围内 66 个文件仍不符合 oxfmt；本轮只格式化了改动文件，未做全库重排"
+    }
+  ],
+  "viewportMatrix": [
+    {
+      "viewport": "1440x900",
+      "layout": "索引脊 258 + 主区 858，记录页与本次办理联页并排",
+      "chatStreamWidth": 443,
+      "railWidth": 258,
+      "overflowX": 0
+    },
+    {
+      "viewport": "1120x820",
+      "layout": "索引脊在上、主区在下，仍并排两页",
+      "chatStreamWidth": 423,
+      "railWidth": 258,
+      "overflowX": 0
+    },
+    {
+      "viewport": "1024x768",
+      "layout": "索引脊在上、主区在下，仍并排两页（修复前使用端仅约 116px 宽）",
+      "chatStreamWidth": 365,
+      "railWidth": 258,
+      "overflowX": 0
+    },
+    {
+      "viewport": "900x760",
+      "layout": "单列",
+      "chatStreamWidth": 786,
+      "railWidth": 864,
+      "overflowX": 0
+    },
+    {
+      "viewport": "390x844",
+      "layout": "单列；加号 44x44、发送按钮通栏 44px 高",
+      "chatStreamWidth": 288,
+      "chatInputWidth": 266,
+      "plusSize": "44x44",
+      "overflowX": 0
+    }
+  ],
+  "interactions": {
+    "settingsDialog": {
+      "element": "dialog.ledger-sheet",
+      "modal": true,
+      "escapeCloses": true,
+      "focusReturnedToTrigger": true,
+      "focusedTextAfterClose": "设置 · 模型 API"
+    },
+    "composerMenu": {
+      "groups": [
+        { "tag": "fieldset", "legend": "附件", "items": 1 },
+        { "tag": "fieldset", "legend": "工作流", "items": 6 },
+        { "tag": "fieldset", "legend": "工作模式", "items": 3 }
+      ],
+      "escapeCloses": true,
+      "focusReturnedToPlusButton": true
+    }
+  },
+  "simulatedRun": {
+    "trigger": "点击「运行当前工作流」",
+    "beforeClick": {
+      "buttonLabel": "运行当前工作流",
+      "routeStates": ["completed", "completed", "completed", "completed", "completed"]
+    },
+    "duringRun": {
+      "buttonLabel": "Agent 正在执行",
+      "routeStates": ["running", "queued", "queued", "queued", "queued"]
+    },
+    "afterRun": {
+      "buttonLabel": "运行当前工作流",
+      "routeStates": ["completed", "completed", "completed", "completed", "completed"],
+      "runLogLines": 7,
+      "result": "演示任务执行成功",
+      "summary": "已按 5 个步骤完成「客户请求分流（带会话记忆）」",
+      "modeStamp": "模拟模式"
+    },
+    "ledgerRow": "客户请求分流（带会话记忆） v2 已完成 23:19:01"
+  },
+  "creatorRegression": {
+    "route": "/studio",
+    "viewports": ["1440x860", "1120x860", "1024x860", "900x860", "390x844"],
+    "overflowX": 0,
+    "notes": "删除 .workflow-map 的 ≤1120px 三列覆盖后，创建端在以上宽度仍显示节点库、画布、Inspector 与底部运行面板，无横向溢出"
+  },
+  "reviewFindings": {
+    "fixed": [
+      "设置页从自绘遮罩改为原生 <dialog>.showModal()：Esc、点遮罩、焦点锁与关闭后归位由 top layer 承担",
+      "加号菜单补齐键盘语义：fieldset/legend 分组、aria-pressed、Esc 关闭并把焦点还给触发按钮",
+      "运行台账状态戳中文化（排队中/运行中/已完成/已失败），不再显示引擎英文状态码",
+      "工作流名过长的片（composer-chip）改为省略号截断，不再撑破输入行",
+      "821–1120px 不再把工作端压回三列轨道；手机端重复操作补到 44px 触控高度",
+      "把 .ledger-sheet-note 与 .ledger-stamp-note 拉回 13px 正文层，不再用 10px 承载长句"
+    ],
+    "open": [
+      "SSE 版节点事件流（当前仍是游标轮询）",
+      "run_node_states 物化表",
+      "带真实 n8n 的克隆环境里用浏览器点一次 Run，确认画布按真实事件点亮"
+    ]
+  },
+  "productionEnabled": false,
+  "deployLocked": true,
+  "outsideValidatedScope": [
+    "未部署生产、未推送远端、未升级或改动生产 n8n",
+    "本轮浏览器实测走的是内置模拟执行器，不是真实 n8n 节点事件",
+    "评审用脚本与截图位于未纳入版本库的 .impeccable/ 与 work/ 目录"
+  ]
+}

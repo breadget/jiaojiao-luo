@@ -181,6 +181,15 @@ Node Inspector
 
 边 Inspector 展示 source/target、kind、label、order 和 branch；第一版不允许用户手工更改 Edge kind，只能重新连接合法端口。
 
+### Agent 行为限制（已实现）
+
+选择 AI Agent 后，Inspector 在 Configuration 与 Ports 之间显示独立的「行为限制」区块。输入直接更新所选节点的 `config.constraints`，各 Agent 分别配置，仍通过现有 Save / Publish 流程保存草稿和发布版本。
+
+- 表单依次提供自然语言说明、标明「可选」的六行文本框、当前字符数与 4,000 字符上限、常用示例和工具权限说明。限制与「任务指令」分开编辑。
+- 「只读操作」「保护隐私」「先确认再执行」按钮将示例追加到现有内容，不覆盖手写限制；相同示例已作为独立一行存在时显示「已添加」并禁用，追加会超出上限时也禁用。
+- 延续 Inspector 的深色字段、细边线和紧凑标签；文本框与示例按钮使用绿色可见焦点环。文本框通过关联标签和 `aria-describedby` 连接说明、计数及权限提示，示例按钮置于带屏幕阅读器名称的字段组中；820 px 以下按钮至少高 44 px，并可换行。
+- 区块末尾明确提示「发布后作为系统指令发送给模型。实际工具权限需在工具端设置。」发布及提示词语义详见 [Workflow Schema](WORKFLOW_SCHEMA.md)。
+
 ## 8. Runtime UI
 
 ### 状态表示

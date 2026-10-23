@@ -225,6 +225,7 @@ export async function getLatestWorkflow() {
         version, has_unpublished_changes, created_at, updated_at, published_at,
         n8n_webhook_url
        FROM workflows
+       WHERE deleted_at IS NULL
        ORDER BY updated_at DESC
        LIMIT 1`,
     )
@@ -240,7 +241,7 @@ export async function getWorkflowById(id: string) {
         version, has_unpublished_changes, created_at, updated_at, published_at,
         n8n_webhook_url
        FROM workflows
-       WHERE id = ?
+       WHERE id = ? AND deleted_at IS NULL
        LIMIT 1`,
     )
     .bind(id)
@@ -256,6 +257,7 @@ export async function listWorkflows() {
         version, has_unpublished_changes, created_at, updated_at, published_at,
         n8n_webhook_url
        FROM workflows
+       WHERE deleted_at IS NULL
        ORDER BY updated_at DESC
        LIMIT 24`,
     )
@@ -302,7 +304,47 @@ export async function createWorkflow() {
   return workflow;
 }
 
-export async function getRecentRuns(workflowId?: string) {
+export type DeleteWorkflowResult = 'deleted' | 'not_found' | 'last_workflow';
+
+/**
+ * 从活动列表删除一个工作流。
+ *
+ * 这里故意使用软删除：运行、会话、Graph 草稿和不可变发布版本都是审计证据，
+ * 列表操作不应把它们级联清空。最后一个活动工作流也不会被删除，避免 Studio
+ * 进入没有可编辑目标的损坏状态；用户可以先新建再删除。
+ */
+export async function deleteWorkflow(
+  id: string,
+): Promise<DeleteWorkflowResult> {
+  const existing = await getD1()
+    .prepare(
+      `SELECT id FROM workflows WHERE id = ? AND deleted_at IS NULL LIMIT 1`,
+    )
+    .bind(id)
+    .first<{ id: string }>();
+  if (!existing) return 'not_found';
+
+  const now = Date.now();
+  const result = await getD1()
+    .prepare(
+      `UPDATE workflows
+       SET deleted_at = ?, updated_at = ?
+       WHERE id = ?
+         AND deleted_at IS NULL
+         AND (SELECT COUNT(*) FROM workflows WHERE deleted_at IS NULL) > 1`,
+    )
+    .bind(now, now, id)
+    .run();
+
+  return (result.meta?.changes ?? 0) > 0 ? 'deleted' : 'last_workflow';
+}
+
+export async function getRecentRuns(
+  workflowId?: string,
+  options: { limit?: number; offset?: number } = {},
+) {
+  const limit = Math.min(Math.max(options.limit ?? 8, 1), 100);
+  const offset = Math.min(Math.max(options.offset ?? 0, 0), 10_000);
   const statement = workflowId
     ? getD1()
         .prepare(
@@ -310,15 +352,15 @@ export async function getRecentRuns(workflowId?: string) {
            FROM runs
            WHERE workflow_id = ?
            ORDER BY started_at DESC
-           LIMIT 8`,
+           LIMIT ? OFFSET ?`,
         )
-        .bind(workflowId)
+        .bind(workflowId, limit, offset)
     : getD1().prepare(
         `SELECT ${RUN_COLUMNS}
          FROM runs
          ORDER BY started_at DESC
-         LIMIT 8`,
-      );
+         LIMIT ? OFFSET ?`,
+      ).bind(limit, offset);
 
   const result = await statement.all<RunRow>();
   return result.results.map(mapRun);
@@ -410,7 +452,8 @@ export async function recordExecutionBinding(
 ): Promise<ExecutionBindingOutcome> {
   const existing = await getExecutionBindingByExecutionId(input.executionId);
   if (existing) {
-    if (existing.requestId === input.requestId) {
+    if (existing.requestId === input.requestId && existing.workflowId === input.workflowId &&
+        (!input.sessionId || !existing.sessionId || existing.sessionId === input.sessionId)) {
       // 幂等：同一对重复上报，什么都不用改
       return { binding: existing, created: false, conflict: false };
     }
@@ -453,7 +496,8 @@ export async function recordExecutionBinding(
     // 并发下另一方先插进去了：读回来按同样的规则处理，不要覆盖
     const winner = await getExecutionBindingByExecutionId(input.executionId);
     if (!winner) throw cause;
-    if (winner.requestId === input.requestId) {
+    if (winner.requestId === input.requestId && winner.workflowId === input.workflowId &&
+        (!input.sessionId || !winner.sessionId || winner.sessionId === input.sessionId)) {
       return { binding: winner, created: false, conflict: false };
     }
     if ((options.onConflict ?? 'keep') === 'reject') {
@@ -679,6 +723,7 @@ export async function saveWorkflow(input: {
   n8nWebhookUrl?: string | null;
 }) {
   const current = await getWorkflowById(input.id);
+  if (!current) return null;
   const now = Date.now();
   const publishing = input.action === 'publish';
   const nextVersion = publishing
